@@ -36,6 +36,16 @@ import pandas as pd
 from .sinopac_session import sinopac_session
 from .engine_technical import BollingerStrategy
 
+# notifier 使用 lazy import，避免啟動時循環依賴
+_notifier = None
+
+def _get_notifier():
+    global _notifier
+    if _notifier is None:
+        from . import notifier as _n
+        _notifier = _n
+    return _notifier
+
 # ── 路徑常數 ────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _DB_PATH = _PROJECT_ROOT / "databases" / "db_technical_prices.db"
@@ -402,6 +412,14 @@ def _run_scan() -> None:
         })
         print(f"[Scanner #{scan_id}] {msg}")
 
+        # ── Discord 通知（只在 DISCORD_NOTIFY_ON_SCAN=true 時觸發） ──────────
+        _SCAN_CACHE["_pending_notify"] = {
+            "scan_id":   scan_id,
+            "scan_time": scan_time,
+            "long":      results_long,
+            "short":     results_short,
+        }
+
     except Exception as exc:
         _SCAN_CACHE.update({
             "status":  "error",
@@ -430,6 +448,20 @@ async def _scanner_loop() -> None:
                     first_run = False
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, _run_scan)
+
+                # ── 掃描完成後，嘗試推送 Discord 通知（非同步，失敗不影響排程） ──
+                pending = _SCAN_CACHE.pop("_pending_notify", None)
+                if pending:
+                    try:
+                        n = _get_notifier()
+                        await n.notify_scan_results(
+                            results_long  = pending["long"],
+                            results_short = pending["short"],
+                            scan_id       = pending["scan_id"],
+                            scan_time     = pending["scan_time"],
+                        )
+                    except Exception as notify_exc:
+                        print(f"[Scanner Notifier] 推送失敗（不影響掃描）: {notify_exc}")
             else:
                 first_run = False  # 非盤中也重置
         except Exception as exc:

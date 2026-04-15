@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -6,7 +6,11 @@ import duckdb
 import sqlite3
 import os
 
+from backend.engines.cache_store import StaticCache, TTL_12H
+
 router = APIRouter()
+
+_CACHE_CONTROL = f"public, max-age={TTL_12H}, stale-while-revalidate=600"
 
 class DividendStatsResponse(BaseModel):
     summary: Dict[str, Dict[str, Any]]
@@ -101,8 +105,18 @@ def get_dividend_window(price_df, div_date, window=3):
     return rows
 
 @router.get("/api/v1/dividend/{stock_code}/scan")
-async def get_dividend_analysis(stock_code: str):
-    """取得個股歷年除權息前後漲跌行為統計分析"""
+async def get_dividend_analysis(stock_code: str, response: Response):
+    """
+    取得個股歷年除權息前後漲跌行為統計分析。
+    結果快取 12 小時（除權息歷史資料每日僅更新一次）。
+    """
+    key    = StaticCache.make_key("dividend:scan", stock_code=stock_code.upper())
+    cached = StaticCache.get(key)
+    if cached is not None:
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "HIT"
+        return cached
+
     try:
         div_df = get_dividends_from_db(stock_code)
         
@@ -201,15 +215,26 @@ async def get_dividend_analysis(stock_code: str):
         yearly_df['totalDividend'] = yearly_df['totalDividend'].round(2)
         yearly_df['avgYield'] = yearly_df['avgYield'].round(2)
         
-        return {
+        result = {
             "summary": summary_rows,
             "details": records,
             "yearly": yearly_df.to_dict(orient="records"),
-            "total_count": len(records)
+            "total_count": len(records),
         }
-        
+        StaticCache.set(key, result, ttl=TTL_12H)
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "MISS"
+        return result
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/v1/dividend/cache")
+async def clear_dividend_cache():
+    """手動清除所有除權息分析快取（日 K 更新後呼叫）。"""
+    n = StaticCache.invalidate_prefix("dividend:")
+    return {"message": f"已清除 {n} 筆除權息快取"}
 
 @router.get("/api/v1/dividend/search")
 async def search_stock(q: str):

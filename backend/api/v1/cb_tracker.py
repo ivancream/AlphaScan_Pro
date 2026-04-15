@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -6,6 +6,10 @@ import duckdb
 import sqlite3
 import os
 import datetime
+
+from backend.engines.cache_store import StaticCache, TTL_12H
+
+_CACHE_CONTROL = f"public, max-age={TTL_12H}, stale-while-revalidate=600"
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -93,12 +97,22 @@ def _enrich_df(df: pd.DataFrame, mdb: MarketDB) -> pd.DataFrame:
 
 @router.get("/api/v1/cb/scan")
 async def get_cb_scan(
+    response: Response,
     ytp_min: float = 3.0,
     debt_max: float = 80.0,
     arb_max: float = 0.0,
-    secured_only: str = "全部", # 全部, 無擔保優先, 僅無擔保
-    days_max: int = 1095
+    secured_only: str = "全部",
+    days_max: int = 1095,
 ):
+    """可轉債篩選掃描，結果快取 12 小時。"""
+    key    = StaticCache.make_key("cb:scan",
+        ytp_min=ytp_min, debt_max=debt_max,
+        arb_max=arb_max, secured_only=secured_only, days_max=days_max)
+    cached = StaticCache.get(key)
+    if cached is not None:
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "HIT"
+        return cached
     try:
         db = get_cbdb()
         mdb = get_mdb()
@@ -139,18 +153,30 @@ async def get_cb_scan(
         # Replace NaN with None for JSON responses
         df_show = df_show.where(pd.notnull(df_show), None)
 
-        return {
+        result = {
             "results": df_show.to_dict(orient="records"),
             "total": len(df),
-            "filtered": len(df_show)
+            "filtered": len(df_show),
         }
+        StaticCache.set(key, result, ttl=TTL_12H)
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "MISS"
+        return result
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/api/v1/cb/stats")
-async def get_cb_stats():
+async def get_cb_stats(response: Response):
+    """可轉債統計概覽，結果快取 12 小時。"""
+    key    = "cb:stats"
+    cached = StaticCache.get(key)
+    if cached is not None:
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "HIT"
+        return cached
     try:
         db = get_cbdb()
         mdb = get_mdb()
@@ -187,22 +213,33 @@ async def get_cb_stats():
             q_count = mat_df.groupby("quarter").size().reset_index(name="count")
             quarters = q_count.to_dict(orient="records")
             
-        return {
+        result = {
             "metrics": {
                 "total": int(total),
                 "unsecuredPct": round(unsecured_pct, 1),
                 "avgArb": round(avg_arb, 1) if avg_arb is not None else None,
-                "highPremiumCount": int(high_premium_count)
+                "highPremiumCount": int(high_premium_count),
             },
             "premiumDist": prem_data,
             "volumeTop10": [{**c, "volume": float(c["volume"])} for c in vol_top],
-            "maturityQuarters": quarters
+            "maturityQuarters": quarters,
         }
+        StaticCache.set(key, result, ttl=TTL_12H)
+        response.headers["Cache-Control"] = _CACHE_CONTROL
+        response.headers["X-Cache"] = "MISS"
+        return result
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/v1/cb/cache")
+async def clear_cb_cache():
+    """手動清除所有可轉債快取（資料更新後呼叫）。"""
+    n = StaticCache.invalidate_prefix("cb:")
+    return {"message": f"已清除 {n} 筆可轉債快取"}
         
 @router.get("/api/v1/cb/history/{cb_id}")
 async def get_cb_hist(cb_id: str):

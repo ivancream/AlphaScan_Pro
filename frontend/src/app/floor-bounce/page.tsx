@@ -10,7 +10,8 @@ export default function FloorBouncePage() {
     const [showMode, setShowMode] = useState('signals'); // all, ceiling, floor, signals
     const [requireVol, setRequireVol] = useState(true);
     const [filterInactive, setFilterInactive] = useState(true);
-    const { scannedStrategies, setScanned } = useAppStore();
+    const scannedStrategies = useAppStore((state) => state.scannedStrategies);
+    const setScanned        = useAppStore((state) => state.setScanned);
     const isScanned = scannedStrategies.includes('floor_bounce');
 
     // For single stock chart

@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { isAxiosError } from 'axios';
-import { useSwingLong, useSwingWanderer } from '@/hooks/useSwing';
+import { useSwingFast, useSwingLong, useSwingWanderer } from '@/hooks/useSwing';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { useAppStore } from '@/store/useAppStore';
 import { useNavigate } from 'react-router-dom';
@@ -80,8 +80,9 @@ export default function SwingLongPage() {
     const [selectedItem, setSelectedItem] = useState<ScanRow | null>(null);
     const [onlyShowDisposition, setOnlyShowDisposition] = useState(false);
     const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
-    const setSymbol = useAppStore((state) => state.setSymbol);
-    const { scannedStrategies, setScanned } = useAppStore();
+    const setSymbol         = useAppStore((state) => state.setSymbol);
+    const scannedStrategies = useAppStore((state) => state.scannedStrategies);
+    const setScanned        = useAppStore((state) => state.setScanned);
     const navigate = useNavigate();
 
     // UI 篩選（前端即時過濾，不觸發後端重掃）
@@ -102,20 +103,37 @@ export default function SwingLongPage() {
     const isLongScanned = scannedStrategies.includes('core_long');
     const isWandererScanned = scannedStrategies.includes('wanderer');
 
-    // 根據策略啟用對應 hook（只有在已執行掃描 && 對應策略時才 enabled）
-    const { data: coreLongResults, isLoading: isLoadingCore, error: errorCore, refetch: refetchCore } =
-        useSwingLong(isLongScanned && strategy === 'core_long', longServerParams);
-    const { data: wandererResults, isLoading: isLoadingWanderer, error: errorWanderer, refetch: refetchWanderer } =
-        useSwingWanderer(isWandererScanned && strategy === 'wanderer', wandererServerParams);
+    // 進入頁面時自動啟動掃描
+    useEffect(() => {
+        setScanned('core_long');
+        setScanned('wanderer');
+    }, [setScanned]);
 
-    const scanResults = strategy === 'core_long' ? coreLongResults : wandererResults;
-    const isLoading = strategy === 'core_long' ? isLoadingCore : isLoadingWanderer;
-    const isActuallyScanned = strategy === 'core_long' ? isLongScanned : isWandererScanned;
+    // ── 快速路徑：讀 intraday scanner 記憶體快取（< 100ms） ──────────────────
+    const fastStrategy = strategy === 'core_long' ? 'long' : 'wanderer';
+    const { data: fastData, isLoading: isFastLoading } = useSwingFast(fastStrategy, true);
+    const fastItems = fastData?.items ?? [];
+    const hasFastResults = fastItems.length > 0;
+
+    // ── 慢速路徑：全市場掃描（快速路徑為空時才啟用） ────────────────────────
+    const slowEnabled = hasFastResults === false && !isFastLoading;
+    const { data: coreLongResults, isLoading: isLoadingCore, error: errorCore, refetch: refetchCore } =
+        useSwingLong(isLongScanned && strategy === 'core_long' && slowEnabled, longServerParams);
+    const { data: wandererResults, isLoading: isLoadingWanderer, error: errorWanderer, refetch: refetchWanderer } =
+        useSwingWanderer(isWandererScanned && strategy === 'wanderer' && slowEnabled, wandererServerParams);
+
+    // 優先使用快速路徑結果；快速路徑為空才用慢速路徑
+    const slowResults = strategy === 'core_long' ? coreLongResults : wandererResults;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scanResults: ScanRow[] | undefined = hasFastResults
+        ? (fastItems as unknown as ScanRow[])
+        : (slowResults as unknown as ScanRow[] | undefined);
+    const isLoading = isFastLoading || (strategy === 'core_long' ? isLoadingCore : isLoadingWanderer);
+    const isActuallyScanned = true;   // 進頁面即自動掃描，永遠顯示結果區塊
     const error = strategy === 'core_long' ? errorCore : errorWanderer;
     const refetchScan = strategy === 'core_long' ? refetchCore : refetchWanderer;
 
-    const filteredResults: ScanRow[] = Array.isArray(scanResults)
-        ? scanResults.filter((item: ScanRow) => {
+    const filteredResults: ScanRow[] = (scanResults ?? []).filter((item) => {
             if (strategy === 'core_long') {
                 if (longFilters.req_ma && item['均線多排'] !== 'V') return false;
                 // 爆量表態：成交量 > 五日均量的兩倍（量比 > 2）
@@ -130,8 +148,7 @@ export default function SwingLongPage() {
             if (wandererFilters.req_bb_level && Number(item['布林位階']) >= 4) return false;
             if (onlyShowDisposition) return Boolean(item.is_disposition);
             return true;
-        })
-        : [];
+        });
 
     const sortedResults = [...filteredResults];
     if (sortConfig !== null) {

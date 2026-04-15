@@ -29,7 +29,7 @@ from backend.api.v1 import (
     market_data, sentiment, global_market, fundamental,
     technical, swing, etfs, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
-    heatmap, live_quotes, all_around, intraday_scanner
+    heatmap, live_quotes, all_around, intraday_scanner, notifier as notifier_api
 )
 from backend.engines.engine_live_quotes import live_quote_engine
 from backend.engines.engine_all_around import all_around_engine
@@ -209,6 +209,7 @@ app.include_router(heatmap.router, tags=["Heatmap"])
 app.include_router(live_quotes.router, tags=["Live Quotes"])
 app.include_router(all_around.router, tags=["All-Around Ticker"])
 app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
+app.include_router(notifier_api.router, tags=["Notifications"])
 
 @app.get("/")
 def read_root():

@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { isAxiosError } from 'axios';
-import { useSwingShort } from '@/hooks/useSwing';
+import { useSwingFast, useSwingShort } from '@/hooks/useSwing';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { useAppStore } from '@/store/useAppStore';
 import { useNavigate } from 'react-router-dom';
@@ -56,9 +56,15 @@ const FilterCheckbox = ({ label, checked, onChange, desc, color }: { label: stri
 );
 
 export default function SwingShortPage() {
-    const { scannedStrategies, setScanned } = useAppStore();
+    const scannedStrategies = useAppStore((state) => state.scannedStrategies);
+    const setScanned        = useAppStore((state) => state.setScanned);
     const isScanned = scannedStrategies.includes('short_sell');
-    
+
+    // 進入頁面時自動啟動掃描
+    useEffect(() => {
+        setScanned('short_sell');
+    }, [setScanned]);
+
     // UI 篩選（前端即時過濾，不觸發後端重掃）
     const [filters, setFilters] = useState({
         req_ma: true,
@@ -66,9 +72,19 @@ export default function SwingShortPage() {
         req_chips: true,
         req_near_band: true
     });
-    // 後端固定抓寬鬆集合，再由前端 filters 即時過濾
+
+    // ── 快速路徑：intraday scanner 記憶體快取（< 100ms） ────────────────────
+    const { data: fastData, isLoading: isFastLoading } = useSwingFast('short', true);
+    const fastItems = (fastData?.items ?? []) as ScanRow[];
+    const hasFastResults = fastItems.length > 0;
+
+    // ── 慢速路徑：全市場掃描（快速路徑為空才啟用） ──────────────────────────
     const shortServerParams = { req_ma: false, req_slope: false, req_chips: false, req_near_band: false };
-    const { data: scanResults, isLoading, error, refetch } = useSwingShort(isScanned, shortServerParams);
+    const { data: slowResults, isLoading: isLoadingSlow, error, refetch } =
+        useSwingShort(isScanned && !hasFastResults && !isFastLoading, shortServerParams);
+
+    const scanResults: ScanRow[] = hasFastResults ? fastItems : ((slowResults ?? []) as ScanRow[]);
+    const isLoading = isFastLoading || isLoadingSlow;
     const [selectedItem, setSelectedItem] = useState<ScanRow | null>(null);
 
     const setSymbol = useAppStore((state) => state.setSymbol);
@@ -87,15 +103,13 @@ export default function SwingShortPage() {
         return 'text-gray-400 font-bold';
     };
 
-    const filteredResults: ScanRow[] = Array.isArray(scanResults)
-        ? scanResults.filter((item: ScanRow) => {
-            if (filters.req_ma && item['空頭排列'] !== 'V') return false;
-            if (filters.req_slope && item['月線下彎'] !== 'V') return false;
-            if (filters.req_chips && item['籌碼渙散'] !== '🔥') return false;
-            if (filters.req_near_band && item['沿下軌'] !== 'V') return false;
-            return true;
-        })
-        : [];
+    const filteredResults: ScanRow[] = scanResults.filter((item) => {
+        if (filters.req_ma && item['空頭排列'] !== 'V') return false;
+        if (filters.req_slope && item['月線下彎'] !== 'V') return false;
+        if (filters.req_chips && item['籌碼渙散'] !== '🔥') return false;
+        if (filters.req_near_band && item['沿下軌'] !== 'V') return false;
+        return true;
+    });
     const latestDataDate = filteredResults[0]?.['資料日期'] ?? '-';
 
     return (

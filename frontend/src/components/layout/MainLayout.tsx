@@ -20,16 +20,45 @@ import { IntradayRefreshBar } from '@/components/ui/IntradayRefreshBar';
 import { GlobalContextMenu } from '@/components/ui/GlobalContextMenu';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
 
-const NAV_ITEMS = [
-    { href: '/taiex-dynamics', icon: <Activity size={18} />, label: '大盤動態' },
-    { href: '/capital-flow', icon: <BarChart3 size={18} />, label: '資金流向' },
-    { href: '/long-selection', icon: <TrendingUp size={18} />, label: '多方選股' },
-    { href: '/short-selection', icon: <TrendingDown size={18} />, label: '空方選股' },
-    { href: '/watchlist', icon: <Star size={18} />, label: '自選清單' },
-    { href: '/double-sword', icon: <GitMerge size={18} />, label: '雙刀戰法' },
-    { href: '/dividends', icon: <Landmark size={18} />, label: '除權息' },
-    { href: '/cb-bond', icon: <CandlestickChart size={18} />, label: '可轉債' },
-] as const;
+type NavItem = { href: string; icon: React.ReactNode; label: string };
+type NavGroup = { title: string; subtitle: string; separated?: boolean; showStockNav?: boolean; items: NavItem[] };
+
+const NAV_GROUPS: NavGroup[] = [
+    {
+        title: '市場動態',
+        subtitle: '高頻',
+        items: [
+            { href: '/taiex-dynamics', icon: <Activity size={18} />, label: '大盤氣氛' },
+            { href: '/capital-flow', icon: <BarChart3 size={18} />, label: '資金流向' },
+        ],
+    },
+    {
+        title: '選股監控',
+        subtitle: '高頻',
+        showStockNav: true,
+        items: [
+            { href: '/watchlist', icon: <Star size={18} />, label: '自選清單' },
+            { href: '/long-selection', icon: <TrendingUp size={18} />, label: '多方選股' },
+            { href: '/short-selection', icon: <TrendingDown size={18} />, label: '空方選股' },
+        ],
+    },
+    {
+        title: '進階數據',
+        subtitle: '每日更新',
+        separated: true,
+        items: [
+            { href: '/double-sword', icon: <GitMerge size={18} />, label: '雙刀戰法' },
+            { href: '/dividends', icon: <Landmark size={18} />, label: '除權息' },
+            { href: '/cb-bond', icon: <CandlestickChart size={18} />, label: '可轉債' },
+        ],
+    },
+];
+
+const NAV_ITEMS = NAV_GROUPS.flatMap((group) => group.items);
+
+function isDirectSymbolQuery(input: string): boolean {
+    return /^[A-Z0-9]{2,10}$/.test(cleanStockSymbol(input));
+}
 
 function getPageTitle(pathname: string): string {
     const matched = NAV_ITEMS.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
@@ -53,6 +82,14 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
     const handleSubmit = async () => {
         const query = searchValue.trim();
         if (!query) return;
+        const normalizedQuery = cleanStockSymbol(query);
+
+        if (normalizedQuery && isDirectSymbolQuery(query)) {
+            useAppStore.getState().setSymbol(normalizedQuery);
+            setSearchValue(normalizedQuery);
+            navigate(toStockDetailPath(normalizedQuery));
+            return;
+        }
 
         try {
             const response = await fetch(
@@ -67,7 +104,7 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
                 window.alert(msg);
                 return;
             }
-            const resolvedSymbol = cleanStockSymbol((data as { symbol?: string }).symbol ?? query);
+            const resolvedSymbol = cleanStockSymbol((data as { symbol?: string }).symbol ?? normalizedQuery);
             useAppStore.getState().setSymbol(resolvedSymbol);
             setSearchValue(resolvedSymbol);
             navigate(toStockDetailPath(resolvedSymbol));
@@ -95,18 +132,39 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
                     </button>
                 </div>
 
-                <nav className="flex-1 p-2 space-y-1 mt-2 overflow-y-auto overflow-x-hidden custom-scrollbar">
-                    {NAV_ITEMS.map((item) => (
-                        <NavItem
-                            key={item.href}
-                            href={item.href}
-                            icon={item.icon}
-                            label={item.label}
-                            isOpen={isSidebarOpen}
-                            active={pathname === item.href || pathname.startsWith(`${item.href}/`)}
-                        />
+                <nav className="flex-1 p-2 mt-2 overflow-y-auto overflow-x-hidden custom-scrollbar">
+                    {NAV_GROUPS.map((group) => (
+                        <div key={group.title} className={clsx('space-y-1', group.separated && 'mt-5 pt-4 border-t border-gray-800')}>
+                            {isSidebarOpen ? (
+                                <div className="px-2 pt-1 pb-2">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[11px] font-semibold tracking-[0.24em] text-gray-500 uppercase">
+                                            {group.title}
+                                        </span>
+                                        <span className="rounded-full border border-gray-700 bg-[#0E1117] px-2 py-0.5 text-[10px] font-medium text-gray-400">
+                                            {group.subtitle}
+                                        </span>
+                                    </div>
+                                </div>
+                            ) : group.separated ? (
+                                <div className="mx-2 my-2 border-t border-gray-800" />
+                            ) : null}
+
+                            {group.items.map((item) => (
+                                <NavItem
+                                    key={item.href}
+                                    href={item.href}
+                                    icon={item.icon}
+                                    label={item.label}
+                                    isOpen={isSidebarOpen}
+                                    active={pathname === item.href || pathname.startsWith(`${item.href}/`)}
+                                />
+                            ))}
+                            {group.showStockNav && (
+                                <StockNavItem isOpen={isSidebarOpen} pathname={pathname} />
+                            )}
+                        </div>
                     ))}
-                    <StockNavItem isOpen={isSidebarOpen} pathname={pathname} />
                 </nav>
             </aside>
 
@@ -121,7 +179,7 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-[#EAB308]" size={16} />
                             <input
                                 type="text"
-                                placeholder="輸入股票代號或名稱，Enter 開啟"
+                                placeholder="輸入股票代號，Enter 開啟個股頁"
                                 value={searchValue}
                                 onChange={(e) => setSearchValue(e.target.value)}
                                 className="bg-[#161B22] border border-gray-700 text-white pl-10 pr-4 py-2 rounded-lg text-sm focus:outline-none focus:border-[#EAB308] focus:ring-1 focus:ring-[#EAB308] w-[320px] transition-all"
@@ -134,22 +192,6 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
-                        <div className="flex items-center text-sm">
-                            <span className="text-gray-400 mr-2 underline decoration-gray-700 underline-offset-4">當前標的：</span>
-                            {cleanStockSymbol(selectedSymbol) ? (
-                <Link
-                    to={toStockDetailPath(selectedSymbol)}
-                    className="bg-[#1E293B] text-[#EAB308] border border-gray-700 px-3 py-1 rounded-md font-black tracking-widest min-w-[80px] text-center hover:border-[#EAB308]/50 hover:bg-[#243044] transition-colors"
-                    title="開啟個股情報中心"
-                >
-                                    {cleanStockSymbol(selectedSymbol)}
-                                </Link>
-                            ) : (
-                                <span className="bg-[#1E293B] text-gray-500 border border-gray-700 px-3 py-1 rounded-md font-mono min-w-[80px] text-center">
-                                    未指定
-                                </span>
-                            )}
-                        </div>
                         <IntradayRefreshBar />
                     </div>
                 </header>
