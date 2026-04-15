@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { isAxiosError } from 'axios';
 import { useSwingShort } from '@/hooks/useSwing';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { useAppStore } from '@/store/useAppStore';
@@ -6,6 +7,23 @@ import { useNavigate } from 'react-router-dom';
 import { ChipsAnalysisWidget } from '@/components/chips/ChipsAnalysisWidget';
 import { TrendingDown, Activity } from 'lucide-react';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
+
+function formatSwingScanError(err: unknown): string {
+    if (isAxiosError(err)) {
+        const code = err.code;
+        if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+            return '掃描請求逾時（超過 90 秒）。系統已自動重試，若仍失敗請稍後再試。';
+        }
+        if (code === 'ERR_NETWORK' || err.message === 'Network Error') {
+            return '無法連線至後端 http://localhost:8000，請確認後端服務已啟動。';
+        }
+        const data = err.response?.data as { detail?: string } | undefined;
+        if (typeof data?.detail === 'string') return data.detail;
+        return err.message || '請求失敗';
+    }
+    if (err instanceof Error) return err.message;
+    return String(err);
+}
 
 type ScanRow = Record<string, string | number | boolean | null | undefined> & {
     _ticker: string;
@@ -41,13 +59,16 @@ export default function SwingShortPage() {
     const { scannedStrategies, setScanned } = useAppStore();
     const isScanned = scannedStrategies.includes('short_sell');
     
-    const [params, setParams] = useState({
+    // UI 篩選（前端即時過濾，不觸發後端重掃）
+    const [filters, setFilters] = useState({
         req_ma: true,
         req_slope: true,
         req_chips: true,
         req_near_band: true
     });
-    const { data: scanResults, isLoading, error } = useSwingShort(isScanned, params);
+    // 後端固定抓寬鬆集合，再由前端 filters 即時過濾
+    const shortServerParams = { req_ma: false, req_slope: false, req_chips: false, req_near_band: false };
+    const { data: scanResults, isLoading, error, refetch } = useSwingShort(isScanned, shortServerParams);
     const [selectedItem, setSelectedItem] = useState<ScanRow | null>(null);
 
     const setSymbol = useAppStore((state) => state.setSymbol);
@@ -66,6 +87,17 @@ export default function SwingShortPage() {
         return 'text-gray-400 font-bold';
     };
 
+    const filteredResults: ScanRow[] = Array.isArray(scanResults)
+        ? scanResults.filter((item: ScanRow) => {
+            if (filters.req_ma && item['空頭排列'] !== 'V') return false;
+            if (filters.req_slope && item['月線下彎'] !== 'V') return false;
+            if (filters.req_chips && item['籌碼渙散'] !== '🔥') return false;
+            if (filters.req_near_band && item['沿下軌'] !== 'V') return false;
+            return true;
+        })
+        : [];
+    const latestDataDate = filteredResults[0]?.['資料日期'] ?? '-';
+
     return (
         <div className="p-6 space-y-6 animate-in fade-in duration-500 text-gray-200">
             <div className="flex justify-between items-center border-b border-gray-800 pb-4">
@@ -76,7 +108,13 @@ export default function SwingShortPage() {
                     </h2>
                 </div>
                 <button
-                    onClick={() => setScanned('short_sell')}
+                    onClick={() => {
+                        if (isScanned) {
+                            void refetch();
+                            return;
+                        }
+                        setScanned('short_sell');
+                    }}
                     disabled={isLoading}
                     className="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-green-900/20 transition flex items-center gap-2 disabled:opacity-50"
                 >
@@ -104,29 +142,29 @@ export default function SwingShortPage() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <FilterCheckbox 
                         label="均線空排" 
-                        checked={params.req_ma} 
-                        onChange={(val) => setParams(prev => ({ ...prev, req_ma: val }))}
+                        checked={filters.req_ma} 
+                        onChange={(val) => setFilters(prev => ({ ...prev, req_ma: val }))}
                         desc="MA5 < MA10 < MA20"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="月線下彎" 
-                        checked={params.req_slope} 
-                        onChange={(val) => setParams(prev => ({ ...prev, req_slope: val }))}
+                        checked={filters.req_slope} 
+                        onChange={(val) => setFilters(prev => ({ ...prev, req_slope: val }))}
                         desc="月線斜率 < 0"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="籌碼渙散" 
-                        checked={params.req_chips} 
-                        onChange={(val) => setParams(prev => ({ ...prev, req_chips: val }))}
+                        checked={filters.req_chips} 
+                        onChange={(val) => setFilters(prev => ({ ...prev, req_chips: val }))}
                         desc="大戶減 / 散戶增"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="沿下軌" 
-                        checked={params.req_near_band} 
-                        onChange={(val) => setParams(prev => ({ ...prev, req_near_band: val }))}
+                        checked={filters.req_near_band} 
+                        onChange={(val) => setFilters(prev => ({ ...prev, req_near_band: val }))}
                         desc="靠近布林下軌 (低買)"
                         color="green"
                     />
@@ -135,12 +173,29 @@ export default function SwingShortPage() {
 
             {isScanned && (
                 <div className="bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-xl">
+                    {!isLoading && !error && filteredResults.length > 0 && (
+                        <div className="px-6 py-3 text-xs text-gray-500 border-b border-gray-800 bg-[#0E1117]">
+                            資料日期：{latestDataDate}
+                        </div>
+                    )}
 
                     {isLoading ? (
                         <div className="p-12"><LoadingState text="正在從高速資料庫中執行全市場空方篩選..." /></div>
                     ) : error ? (
-                        <div className="p-6 text-red-400 bg-red-900/10">掃描過程發生溢出或連線錯誤。</div>
-                    ) : scanResults && scanResults.length > 0 ? (
+                        <div className="p-6 space-y-4 bg-red-950/20 border-t border-red-900/40">
+                            <p className="text-red-300 font-semibold">掃描失敗</p>
+                            <pre className="text-xs text-red-200/90 whitespace-pre-wrap font-mono bg-black/30 rounded-lg p-4 overflow-auto max-h-48">
+                                {formatSwingScanError(error)}
+                            </pre>
+                            <button
+                                type="button"
+                                onClick={() => refetch()}
+                                className="px-4 py-2 rounded-md bg-red-800 hover:bg-red-700 text-white text-sm"
+                            >
+                                重試
+                            </button>
+                        </div>
+                    ) : filteredResults && filteredResults.length > 0 ? (
                         <div className="overflow-x-auto">
                             <table className="w-full text-left text-sm text-gray-300">
                                 <thead className="bg-[#0E1117] text-gray-400 text-xs uppercase font-semibold border-b border-gray-800">
@@ -157,11 +212,10 @@ export default function SwingShortPage() {
                                         <th className="px-6 py-4">沿下軌</th>
                                         <th className="px-6 py-4">大戶變動</th>
                                         <th className="px-6 py-4">散戶變動</th>
-                                        <th className="px-6 py-4 text-xs opacity-50">資料日期</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-800">
-                                    {scanResults.map((item: ScanRow, idx: number) => (
+                                    {filteredResults.map((item: ScanRow, idx: number) => (
                                         <tr
                                             key={idx}
                                             onClick={() => handleRowClick(item)}
@@ -194,7 +248,6 @@ export default function SwingShortPage() {
                                             <td className="px-6 py-4 font-bold">{item["沿下軌"]}</td>
                                             <td className="px-6 py-4 font-mono text-blue-400">{item["大戶變動"]}</td>
                                             <td className="px-6 py-4 font-mono text-red-400">+{item["散戶變動"]}</td>
-                                            <td className="px-6 py-4 font-mono text-gray-500 text-xs">{item['資料日期']}</td>
                                         </tr>
                                     ))}
                                 </tbody>

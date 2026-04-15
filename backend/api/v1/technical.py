@@ -5,11 +5,6 @@ import os
 import google.generativeai as genai
 from fastapi.responses import StreamingResponse
 import pandas as pd
-import sqlite3
-from pathlib import Path
-
-root_path = Path(__file__).parent.parent.parent.parent.absolute()
-DB_FILE = root_path / "data" / "taiwan_stock.db"
 
 from engines import engine_technical
 
@@ -23,65 +18,25 @@ class ChatRequest(BaseModel):
     user_msg: str
     history: List[Dict[str, str]]
 
-def fetch_data_from_db(stock_code: str) -> pd.DataFrame:
-    """從 SQLite 獲取歷史 K 線數據 (取代原本 yfinance)"""
-    try:
-        # Normalize symbol
-        symbol = str(stock_code).strip().upper()
-        # 嘗試找出正確的後綴
-        symbols_to_try = []
-        if symbol.isdigit() and len(symbol) in [4, 5]:
-            symbols_to_try = [f"{symbol}.TW", f"{symbol}.TWO"]
-        else:
-            symbols_to_try = [symbol]
-            
-        with sqlite3.connect(str(DB_FILE)) as conn:
-            for s in symbols_to_try:
-                # 這裡 SQLite 的 table 是 daily_price, column 是 stock_id
-                clean_id = s.split('.')[0]
-                df = pd.read_sql("""
-                    SELECT date as Date, open as Open, high as High, low as Low, close as Close, volume as Volume
-                    FROM daily_price
-                    WHERE stock_id = ?
-                    ORDER BY date ASC
-                """, conn, params=[clean_id])
-                
-                if not df.empty:
-                    df['Date'] = pd.to_datetime(df['Date'])
-                    df.set_index('Date', inplace=True)
-                    return df
-            
-        return None
-        
-        # 為了相容 engine_technical 的 pandas_ta 計算，將 Date 設為 index
-        df.set_index('Date', inplace=True)
-        return df
-    except Exception as e:
-        print(f"DuckDB fetch error: {e}")
-        return None
-
 @router.get("/api/v1/technical/indicators/{stock_code}")
 async def get_technical_indicators(stock_code: str):
     """
-    提供技術指標計算後的最末筆摘要
+    提供技術指標計算後的最末筆摘要（包含今日盤中快照）
     """
     try:
-        df = fetch_data_from_db(stock_code)
-        if df is None or df.empty:
-            df = engine_technical.fetch_data(stock_code, "6mo")
-            
+        df = engine_technical.fetch_data(stock_code, "6mo")
+
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No historical data found")
-            
+
         df_calc = engine_technical.calculate_indicators(df)
         summary = engine_technical.get_latest_summary(df_calc)
-        
         name = engine_technical.get_symbol_name(stock_code)
-        
+
         return {
             "symbol": stock_code,
             "name": name,
-            "summary": summary
+            "summary": summary,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -99,9 +54,7 @@ async def generate_technical_stream_report(req: TechnicalReportRequest):
             
         genai.configure(api_key=GEMINI_API_KEY)
         
-        df = fetch_data_from_db(req.stock_code)
-        if df is None or df.empty:
-             df = engine_technical.fetch_data(req.stock_code, req.period)
+        df = engine_technical.fetch_data(req.stock_code, req.period)
              
         if df is None or df.empty:
             yield f"data: 無法取得股價技術資料\n\n"

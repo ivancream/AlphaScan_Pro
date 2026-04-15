@@ -44,16 +44,20 @@ class QuoteSnapshot:
 
 class ShioajiAdapter:
     """
-    封裝永豐 Shioaji 的登入與行情訂閱。
-    若任何步驟失敗均回傳 False，由上層引擎降級至 yfinance。
+    封裝永豐 Shioaji 的行情訂閱。
+
+    【架構改動】
+    不再自行 login；改用 sinopac_session（全域共享連線）取得 api 物件，
+    並透過 sinopac_session.add_stk_handler() 注冊 Tick 分發器，
+    避免多引擎各自 login 互踢的問題。
     """
 
     def __init__(self) -> None:
         self._api = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._on_quote_callback = None          # 由 LiveQuoteEngine 注入
-        self._subscribed: set[str] = set()      # 已訂閱的 stock_id
-        self._stock_to_ref: Dict[str, float] = {}  # stock_id -> 昨收參考價
+        self._on_quote_callback = None
+        self._subscribed: set[str] = set()
+        self._stock_to_ref: Dict[str, float] = {}
 
     def connect(
         self,
@@ -61,51 +65,44 @@ class ShioajiAdapter:
         on_quote_callback,
     ) -> bool:
         """
-        嘗試登入 Shioaji。
+        取得共享 Shioaji Session 並注冊 Tick 處理器。
         - loop: asyncio 主迴圈，tick callback 需要跨執行緒投遞
         - on_quote_callback: async def(stock_id, price, volume, ts) 協程
         """
-        creds = get_sinopac_env()
-        if not creds["api_key"] or not creds["secret_key"]:
-            print("[Shioaji] 未設定 API Key，跳過連線")
+        from backend.engines.sinopac_session import sinopac_session
+
+        api = sinopac_session.api
+        if api is None:
+            print("[ShioajiAdapter] 共享 Session 未連線，LiveQuotes 降級至 yfinance")
             return False
 
+        self._api = api
+        self._loop = loop
+        self._on_quote_callback = on_quote_callback
+
+        # 注冊 Tick 處理器到共享分發器（不覆蓋其他引擎的 callback）
+        sinopac_session.add_stk_handler(self._handle_tick_sync)
+        print("[ShioajiAdapter] 已注冊 STK Tick 處理器（共享 Session）")
+        return True
+
+    def _handle_tick_sync(self, exchange, tick) -> None:
+        """同步 Tick 處理器（在 Shioaji 執行緒中被呼叫）。"""
+        if self._loop is None or self._on_quote_callback is None:
+            return
         try:
-            import shioaji as sj
-
-            self._api = sj.Shioaji(simulation=creds["simulation"])
-            self._api.login(
-                api_key=creds["api_key"],
-                secret_key=creds["secret_key"],
-                fetch_contract=True,
-            )
-            self._loop = loop
-            self._on_quote_callback = on_quote_callback
-            self._register_callbacks()
-            print(
-                f"[Shioaji] 登入成功 (simulation={creds['simulation']})"
-            )
-            return True
-        except Exception as exc:  # noqa: BLE001
-            print(f"[Shioaji] 登入失敗，降級至 yfinance: {exc}")
-            self._api = None
-            return False
-
-    def _register_callbacks(self) -> None:
-        api = self._api
-        loop = self._loop
-        callback = self._on_quote_callback
-
-        @api.on_tick_stk_v1()
-        def _handle_tick(exchange, tick):
             ts = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
             price = float(tick.close) if tick.close else 0.0
+            # tick.total_volume: 當日累積成交量（張）；用於顯示今日總量
             volume = int(tick.total_volume) if tick.total_volume else 0
             stock_id = str(tick.code)
             asyncio.run_coroutine_threadsafe(
-                callback(stock_id=stock_id, price=price, volume=volume, ts=ts),
-                loop,
+                self._on_quote_callback(
+                    stock_id=stock_id, price=price, volume=volume, ts=ts
+                ),
+                self._loop,
             )
+        except Exception:  # noqa: BLE001
+            pass
 
     def subscribe_pool(self, symbol_pool: List[dict]) -> None:
         """訂閱 symbol_pool 中尚未訂閱的標的。"""
@@ -191,6 +188,7 @@ class LiveQuoteEngine:
 
         loop = asyncio.get_event_loop()
         if sinopac_credentials_configured():
+            # connect() 不再阻塞（僅從共享 Session 取 api 物件並注冊 handler）
             self._shioaji_active = self._shioaji.connect(
                 loop=loop,
                 on_quote_callback=self._on_shioaji_tick,

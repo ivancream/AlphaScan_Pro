@@ -81,12 +81,13 @@ export default function AllAroundPage() {
 
         {/* 類型圖例 */}
         <div className="flex items-center gap-4 text-[10px] font-mono ml-4">
-          <span><span className="text-sky-400 font-bold">【股】</span> 股票 / ETF</span>
-          <span><span className="text-purple-400 font-bold">【權】</span> 權證</span>
-          <span><span className="text-orange-400 font-bold">【期】</span> 期貨</span>
-          <span className="ml-2"><span className="text-red-400 font-bold">紅字</span> = 外盤</span>
-          <span><span className="text-green-400 font-bold">綠字</span> = 內盤</span>
-          <span><span className="text-yellow-300 font-bold bg-yellow-500/10 px-1 rounded">高亮列</span> = 大單</span>
+          <span><span className="text-sky-300 font-bold bg-sky-900/40 px-1 rounded">現貨</span></span>
+          <span><span className="text-orange-300 font-bold bg-orange-900/40 px-1 rounded">期貨</span></span>
+          <span><span className="text-red-300 font-bold bg-red-900/30 px-1 rounded">認購</span></span>
+          <span><span className="text-green-300 font-bold bg-green-900/30 px-1 rounded">認售</span></span>
+          <span className="ml-2 border-l border-gray-700 pl-3">成交：<span className="text-red-400">漲紅</span> / <span className="text-green-400">跌綠</span> / <span className="text-gray-300">平白</span></span>
+          <span>量：<span className="text-red-400">外紅</span> / <span className="text-green-400">內綠</span></span>
+          <span><span className="text-yellow-300 font-bold bg-yellow-500/10 px-1 rounded">高亮</span> = 大單</span>
         </div>
 
         {/* 手動重連按鈕 */}

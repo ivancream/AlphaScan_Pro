@@ -29,11 +29,12 @@ from backend.api.v1 import (
     market_data, sentiment, global_market, fundamental,
     technical, swing, etfs, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
-    heatmap, live_quotes, all_around
+    heatmap, live_quotes, all_around, intraday_scanner
 )
 from backend.engines.engine_live_quotes import live_quote_engine
 from backend.engines.engine_all_around import all_around_engine
 from backend.engines.engine_symbol_pool import get_symbol_pool
+from backend.engines.sinopac_session import sinopac_session
 
 import google.generativeai as genai
 
@@ -72,7 +73,7 @@ app.add_middleware(
 
 # 初始化 DuckDB 資料庫
 @app.on_event("startup")
-def startup_db_client():
+async def startup_db_client():
     data_dir = root_path / 'data'
     data_dir.mkdir(exist_ok=True)
     db_path = data_dir / 'market.duckdb'
@@ -144,18 +145,33 @@ def startup_db_client():
             );
         """)
 
-    # 啟動盤中自動更新排程器 (每小時, 僅盤中時段)
+    # ── Step 1: 優先完成 Shioaji 共享 Session 登入（所有引擎共用此連線） ──────
+    # 在 executor 中執行（fetch_contract=True 需要 5~15 秒阻塞，不能在 event loop 中直接跑）
+    import asyncio
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, sinopac_session.connect)
+        if sinopac_session.is_connected:
+            print("[Startup] Shioaji 共享 Session 登入成功")
+        else:
+            print(f"[Startup] Shioaji 未連線（{sinopac_session.last_error}），各引擎將降級至 yfinance")
+    except Exception as exc:
+        print(f"[Startup] Shioaji 登入例外: {exc}")
+
+    # ── Step 2: 啟動盤中更新排程 ───────────────────────────────────────────────
     intraday.start_scheduler()
 
-    # 啟動即時報價引擎 (watchlist 快照 / yfinance fallback)
+    # ── Step 3: 啟動盤中 30 分鐘技術面掃描排程器 ─────────────────────────────
+    from backend.engines.engine_intraday_scanner import start_scanner as start_intraday_scanner
+    start_intraday_scanner()
+
+    # ── Step 4: 啟動即時報價引擎（Shioaji handler 注冊 / yfinance fallback）──
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
         loop.create_task(live_quote_engine.start())
     except Exception as exc:
         print(f"[LiveQuotes] Failed to start engine: {exc}")
 
-    # 啟動全方位報價引擎 (AllAroundTicker — Shioaji STK + FOP ticks)
+    # ── Step 5: 啟動全方位報價引擎（STK + FOP ticks）────────────────────────
     try:
         pool = get_symbol_pool(top_n=50)
         stk_symbols = [item["stock_id"] for item in pool]
@@ -170,6 +186,7 @@ def startup_db_client():
 async def shutdown_engines():
     await live_quote_engine.stop()
     await all_around_engine.stop()
+    sinopac_session.disconnect()  # 最後統一登出共享 Session
 
 # 註冊 API 路由 (Controllers)
 app.include_router(market_data.router, tags=["Market Data"])
@@ -191,6 +208,7 @@ app.include_router(backtest.router, tags=["Backtesting"])
 app.include_router(heatmap.router, tags=["Heatmap"])
 app.include_router(live_quotes.router, tags=["Live Quotes"])
 app.include_router(all_around.router, tags=["All-Around Ticker"])
+app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
 
 @app.get("/")
 def read_root():

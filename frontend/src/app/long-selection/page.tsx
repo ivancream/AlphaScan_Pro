@@ -11,6 +11,9 @@ import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
 function formatSwingScanError(err: unknown): string {
     if (isAxiosError(err)) {
         const code = err.code;
+        if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+            return '掃描請求逾時（超過 90 秒）。\n系統已自動重試，若仍失敗請稍後再試或縮小篩選條件。';
+        }
         if (code === 'ERR_NETWORK' || err.message === 'Network Error') {
             return '無法連線至後端 http://localhost:8000。\n請在專案根目錄另開終端機執行：uvicorn backend.main:app --reload --port 8000';
         }
@@ -41,7 +44,7 @@ type ScanRow = Record<string, string | number | boolean | null | undefined> & {
 const STRATEGY_CONFIG: Record<Strategy, { label: string; desc: string; color: string }> = {
     core_long: {
         label: '猛虎出閘',
-        desc: '布林通道開口擴張 (必要) + 均線多頭排列 (建議) + 爆量表態訊號',
+        desc: '通道擴張 + 均線多頭排列 + 爆量表態訊號',
         color: 'red',
     },
     wanderer: {
@@ -81,24 +84,29 @@ export default function SwingLongPage() {
     const { scannedStrategies, setScanned } = useAppStore();
     const navigate = useNavigate();
 
-    const [longParams, setLongParams] = useState({
+    // UI 篩選（前端即時過濾，不觸發後端重掃）
+    const [longFilters, setLongFilters] = useState({
         req_ma: true,
         req_vol: true,
         req_slope: true
     });
-    const [wandererParams, setWandererParams] = useState({
+    const [wandererFilters, setWandererFilters] = useState({
         req_slope: true,
         req_bb_level: true
     });
+
+    // 後端掃描參數固定為「寬鬆條件」，拿到結果後再由前端 checkbox 過濾
+    const longServerParams = { req_ma: false, req_vol: false, req_slope: false };
+    const wandererServerParams = { req_slope: false, req_bb_level: false };
 
     const isLongScanned = scannedStrategies.includes('core_long');
     const isWandererScanned = scannedStrategies.includes('wanderer');
 
     // 根據策略啟用對應 hook（只有在已執行掃描 && 對應策略時才 enabled）
     const { data: coreLongResults, isLoading: isLoadingCore, error: errorCore, refetch: refetchCore } =
-        useSwingLong(isLongScanned && strategy === 'core_long', longParams);
+        useSwingLong(isLongScanned && strategy === 'core_long', longServerParams);
     const { data: wandererResults, isLoading: isLoadingWanderer, error: errorWanderer, refetch: refetchWanderer } =
-        useSwingWanderer(isWandererScanned && strategy === 'wanderer', wandererParams);
+        useSwingWanderer(isWandererScanned && strategy === 'wanderer', wandererServerParams);
 
     const scanResults = strategy === 'core_long' ? coreLongResults : wandererResults;
     const isLoading = strategy === 'core_long' ? isLoadingCore : isLoadingWanderer;
@@ -108,7 +116,19 @@ export default function SwingLongPage() {
 
     const filteredResults: ScanRow[] = Array.isArray(scanResults)
         ? scanResults.filter((item: ScanRow) => {
-            if (strategy === 'wanderer' && onlyShowDisposition) return item.is_disposition;
+            if (strategy === 'core_long') {
+                if (longFilters.req_ma && item['均線多排'] !== 'V') return false;
+                // 爆量表態：成交量 > 五日均量的兩倍（量比 > 2）
+                if (longFilters.req_vol && Number(item['量比']) <= 2) return false;
+                // 通道擴張：上軌斜率 > 0（下軌斜率 < 0 由後端核心條件保障）
+                if (longFilters.req_slope && Number(item['上軌斜率']) <= 0) return false;
+                return true;
+            }
+
+            // wanderer
+            if (wandererFilters.req_slope && Number(item['月線斜率(%)']) <= 0.8) return false;
+            if (wandererFilters.req_bb_level && Number(item['布林位階']) >= 4) return false;
+            if (onlyShowDisposition) return Boolean(item.is_disposition);
             return true;
         })
         : [];
@@ -140,6 +160,7 @@ export default function SwingLongPage() {
             return 0;
         });
     }
+    const latestDataDate = sortedResults[0]?.['資料日期'] ?? '-';
 
     const cfg = STRATEGY_CONFIG[strategy];
     const btnColor =
@@ -167,6 +188,15 @@ export default function SwingLongPage() {
     };
 
     const handleStartScan = () => {
+        // 第一次點擊: 啟用 query；後續點擊: 主動重掃
+        if (strategy === 'core_long' && isLongScanned) {
+            void refetchCore();
+            return;
+        }
+        if (strategy === 'wanderer' && isWandererScanned) {
+            void refetchWanderer();
+            return;
+        }
         setScanned(strategy);
     };
 
@@ -240,23 +270,23 @@ export default function SwingLongPage() {
                         <>
                             <FilterCheckbox 
                                 label="均線多排" 
-                                checked={longParams.req_ma} 
-                                onChange={(val) => setLongParams(prev => ({ ...prev, req_ma: val }))}
+                                checked={longFilters.req_ma} 
+                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_ma: val }))}
                                 desc="MA5 > MA10 > MA20"
                                 color="red"
                             />
                             <FilterCheckbox 
-                                label="斜率翻揚" 
-                                checked={longParams.req_slope} 
-                                onChange={(val) => setLongParams(prev => ({ ...prev, req_slope: val }))}
-                                desc="上軌斜率 > 0% 且處於擴張狀態"
+                                label="通道擴張" 
+                                checked={longFilters.req_slope} 
+                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_slope: val }))}
+                                desc="上軌斜率 > 0、下軌斜率 < 0"
                                 color="red"
                             />
                             <FilterCheckbox 
                                 label="爆量表態" 
-                                checked={longParams.req_vol} 
-                                onChange={(val) => setLongParams(prev => ({ ...prev, req_vol: val }))}
-                                desc="成交量增長 > 2.0 倍"
+                                checked={longFilters.req_vol} 
+                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_vol: val }))}
+                                desc="成交量 > 五日均量 × 2"
                                 color="red"
                             />
                         </>
@@ -264,15 +294,15 @@ export default function SwingLongPage() {
                         <>
                             <FilterCheckbox 
                                 label="月線斜率" 
-                                checked={wandererParams.req_slope} 
-                                onChange={(val) => setWandererParams(prev => ({ ...prev, req_slope: val }))}
+                                checked={wandererFilters.req_slope} 
+                                onChange={(val) => setWandererFilters(prev => ({ ...prev, req_slope: val }))}
                                 desc="月線斜率翻揚 > 0.8%"
                                 color="amber"
                             />
                             <FilterCheckbox 
                                 label="布林位階" 
-                                checked={wandererParams.req_bb_level} 
-                                onChange={(val) => setWandererParams(prev => ({ ...prev, req_bb_level: val }))}
+                                checked={wandererFilters.req_bb_level} 
+                                onChange={(val) => setWandererFilters(prev => ({ ...prev, req_bb_level: val }))}
                                 desc="位階 < 4 (具備均值回歸空間)"
                                 color="amber"
                             />
@@ -285,7 +315,10 @@ export default function SwingLongPage() {
             {isActuallyScanned && (
                 <div className="bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-xl">
                     <div className="flex justify-between items-center bg-[#0E1117] px-6 py-4 border-b border-gray-800">
-                        <h3 className="font-bold text-gray-300">掃描結果 ({filteredResults.length})</h3>
+                        <div className="flex items-center gap-4">
+                            <h3 className="font-bold text-gray-300">掃描結果 ({filteredResults.length})</h3>
+                            <span className="text-xs text-gray-500">資料日期：{latestDataDate}</span>
+                        </div>
                         {strategy === 'wanderer' && (
                             <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer hover:text-white transition">
                                 <input 
@@ -326,13 +359,9 @@ export default function SwingLongPage() {
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('收盤價')}>股價{renderSortIcon('收盤價')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('今日漲跌幅(%)')}>漲跌幅{renderSortIcon('今日漲跌幅(%)')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交量(張)')}>成交量(張){renderSortIcon('成交量(張)')}</th>
-                                            <th className="px-6 py-4 text-red-400 font-bold cursor-pointer hover:text-red-300" onClick={() => handleSort('均線多排')}>均線多排{renderSortIcon('均線多排')}</th>
-                                            <th className="px-6 py-4 text-red-400 font-bold cursor-pointer hover:text-red-300" onClick={() => handleSort('爆量表態')}>爆量表態{renderSortIcon('爆量表態')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('月線斜率')}>月線斜率%{renderSortIcon('月線斜率')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('上軌斜率')}>上軌斜率%{renderSortIcon('上軌斜率')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('量比')}>量比{renderSortIcon('量比')}</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交額(億)')}>成交額(億){renderSortIcon('成交額(億)')}</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:text-white text-xs opacity-50" onClick={() => handleSort('資料日期')}>日期{renderSortIcon('資料日期')}</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-800">
@@ -360,16 +389,12 @@ export default function SwingLongPage() {
                                                 </td>
                                                 <td className="px-6 py-4 font-medium text-white">{item['名稱']}</td>
                                                 <td className="px-6 py-4 text-gray-400">{item['產業']}</td>
-                                                <td className="px-6 py-4 font-mono">{Number(item['收盤價']).toFixed(1)}</td>
+                                                <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item['收盤價']).toFixed(1)}</td>
                                                 <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item['今日漲跌幅(%)']).toFixed(2)}%</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['成交量(張)']).toLocaleString()}</td>
-                                                <td className="px-6 py-4 font-bold">{item['均線多排']}</td>
-                                                <td className="px-6 py-4 font-bold">{item['爆量表態']}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['月線斜率']).toFixed(1)}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['上軌斜率']).toFixed(1)}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['量比']).toFixed(1)}</td>
-                                                <td className="px-6 py-4 font-mono text-amber-400">{Number(item['成交額(億)']).toFixed(2)}</td>
-                                                <td className="px-6 py-4 font-mono text-gray-500 text-xs">{item['資料日期']}</td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -389,7 +414,6 @@ export default function SwingLongPage() {
                                             <th className="px-6 py-4 text-amber-400 font-bold cursor-pointer hover:text-amber-300" onClick={() => handleSort('布林位階')}>布林位階{renderSortIcon('布林位階')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交額(億)')}>成交額(億){renderSortIcon('成交額(億)')}</th>
                                             <th className="px-6 py-4 text-red-400 font-bold cursor-pointer hover:text-red-300" onClick={() => handleSort('處置狀態')}>處置狀態{renderSortIcon('處置狀態')}</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:text-white text-xs opacity-50" onClick={() => handleSort('資料日期')}>日期{renderSortIcon('資料日期')}</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-800">
@@ -428,7 +452,6 @@ export default function SwingLongPage() {
                                                 </td>
                                                 <td className="px-6 py-4 font-mono text-amber-400">{Number(item['成交額(億)']).toFixed(2)}</td>
                                                 <td className="px-6 py-4 font-bold text-red-400">{item['處置狀態']}</td>
-                                                <td className="px-6 py-4 font-mono text-gray-500 text-xs">{item['資料日期']}</td>
                                             </tr>
                                         ))}
                                     </tbody>

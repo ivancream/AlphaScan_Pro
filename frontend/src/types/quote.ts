@@ -52,15 +52,18 @@ export type LiveSocketEvent =
 // 全方位報價 (AllAroundTicker) 型別
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type AssetType = 'STOCK' | 'FUTURES' | 'WARRANT';
-export type TickType  = 'BUY_UP' | 'SELL_DOWN' | 'NEUTRAL';
+export type AssetType   = '現貨' | '期貨' | '認購' | '認售';
+export type TickDir     = 'OUTER' | 'INNER' | 'NONE';
+export type ChgType     = 'LIMIT_UP' | 'UP' | 'FLAT' | 'DOWN' | 'LIMIT_DOWN';
 
 export interface UnifiedTick {
-  ts:         string;      // UTC ISO-8601
+  ts:         string;      // HH:MM:SS
   symbol:     string;
   name:       string;
   asset_type: AssetType;
   price:      number;
   volume:     number;      // 張 (股票/權證) / 口 (期貨)
-  tick_type:  TickType;
+  tick_dir:   TickDir;     // 外盤/內盤
+  chg_type:   ChgType;    // 漲跌註記（決定價格顏色）
+  pct_chg:    number;      // 漲跌幅 %
 }

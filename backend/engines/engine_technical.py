@@ -1,14 +1,22 @@
 # engine_technical.py
 import os
-import yfinance as yf
+import sqlite3
+from datetime import date, timedelta
 import pandas as pd
 import numpy as np
 import google.generativeai as genai
 import streamlit as st
 from typing import Tuple, List, Dict, Optional, Any
 from . import prompts
-from .sinopac_snapshots import merge_sinopac_change_pct_into_rows
+from .sinopac_snapshots import (
+    merge_sinopac_change_pct_into_rows,
+    fetch_single_stock_ohlcv,
+)
 import pandas_ta as ta
+
+# 資料庫路徑（相對於專案根目錄）
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_TECH_DB_PATH = os.path.join(_PROJECT_ROOT, "databases", "db_technical_prices.db")
 
 # 常用權值股中文名稱對照表 (當 yfinance 抓不到中文時的備案)
 TW_NAMES = {
@@ -30,94 +38,119 @@ TW_NAMES = {
 # 使用 os.environ.get 讀取環境變數
 # GEMINI_API_KEY is configured in main_app.py
 
+def _period_to_start_date(period: str) -> date:
+    """將 yfinance 風格的 period 字串換算為起始日期。"""
+    _MAP = {
+        "1mo": 30, "3mo": 90, "6mo": 180,
+        "1y": 365, "2y": 730, "5y": 1825, "max": 3650,
+    }
+    days = _MAP.get(period.lower(), 365)
+    return date.today() - timedelta(days=days)
+
+
 def fetch_data(stock_id: str, period: str = "1y") -> Optional[pd.DataFrame]:
     """
-    抓取股價並進行資料清洗
+    【雙層快取架構】取得技術分析用的完整 K 線 DataFrame。
+
+    Layer-1（歷史層）：從 db_technical_prices.db 的 daily_price 表讀取截至
+        「昨日」為止的日 K，資料穩定且無延遲。
+    Layer-2（即時層）：呼叫永豐 Sinopac snapshot API 取得今日盤中最新
+        OHLCV，append 為 DataFrame 最後一筆，讓指標計算能反映即時價格。
+        若 API 不可用（未設定憑證 / 盤後），則跳過今日快照，僅用歷史資料。
+
+    完全棄用 yfinance。
     """
-    # 處理台股代碼後綴
-    stock_id = str(stock_id).strip()
-    symbols_to_try = []
-    
-    if stock_id.isdigit():
-        symbols_to_try = [f"{stock_id}.TW", f"{stock_id}.TWO"]
-    elif not stock_id.endswith(".TW") and not stock_id.endswith(".TWO"):
-        symbols_to_try = [f"{stock_id}.TW", f"{stock_id}.TWO"]
-    else:
-        symbols_to_try = [stock_id]
-        
-    df = None
-    final_symbol = symbols_to_try[0]
-    
-    for sym in symbols_to_try:
-        try:
-            print(f"正在嘗試抓取 {sym}...")
-            df = yf.download(sym, period=period, progress=False, auto_adjust=False)
-            if df is not None and not df.empty:
-                final_symbol = sym
-                break
-        except Exception as e:
-            print(f"嘗試 {sym} 失敗: {e}")
-            continue
-    
-    if df is None or df.empty:
-        return None
-        
-    # 處理 MultiIndex (yfinance 新版問題)
-    if isinstance(df.columns, pd.MultiIndex):
-        try:
-            # 嘗試直接降維，若只有單一 Ticker，level 1 通常是 Ticker 名稱
-            if symbol in df.columns.get_level_values(1):
-                df = df.xs(symbol, axis=1, level=1)
-            else:
-                df.columns = df.columns.get_level_values(0)
-        except:
-             df.columns = df.columns.get_level_values(0)
-    
-    # 強制將索引轉為 Datetime 並移除時區資訊 (避免後續繪圖問題)
-    if isinstance(df.index, pd.DatetimeIndex):
-         df.index = df.index.tz_localize(None)
-    else:
-         df.index = pd.to_datetime(df.index).tz_localize(None)
-    
-    # ✅ 關鍵修正：檢查必要欄位是否存在
-    # Standardize columns to simplify check
-    df.columns = [c.capitalize() for c in df.columns]
-    
-    required_cols = ['Close', 'Open', 'High', 'Low'] 
-    # Volume sometimes is missing in indices, we can handle it
-    
-    missing_cols = [c for c in required_cols if c not in df.columns]
-    if missing_cols:
-        print(f"缺少必要欄位: {missing_cols}")
+    raw_id = str(stock_id).strip()
+    # 剝除 .TW / .TWO 後綴，取純數字代碼供 DB 查詢
+    pure_id = raw_id.replace(".TWO", "").replace(".TW", "")
+
+    if not os.path.exists(_TECH_DB_PATH):
+        print(f"[fetch_data] 找不到資料庫: {_TECH_DB_PATH}")
         return None
 
-    # 移除任何含有 NaN 的列 (確保沒有空數據日)
+    start_date = _period_to_start_date(period)
+
+    try:
+        conn = sqlite3.connect(_TECH_DB_PATH)
+        yesterday = date.today() - timedelta(days=1)
+        df = pd.read_sql(
+            """
+            SELECT date AS Date, open AS Open, high AS High,
+                   low AS Low, close AS Close, volume AS Volume
+            FROM daily_price
+            WHERE stock_id = ?
+              AND date >= ?
+              AND date <= ?
+            ORDER BY date ASC
+            """,
+            conn,
+            params=[pure_id, start_date.isoformat(), yesterday.isoformat()],
+        )
+        conn.close()
+    except Exception as exc:
+        print(f"[fetch_data] 讀取 DB 失敗 ({pure_id}): {exc}")
+        return None
+
+    if df is None or df.empty:
+        print(f"[fetch_data] DB 無資料: {pure_id}")
+        return None
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df.set_index("Date", inplace=True)
+    df.index = df.index.tz_localize(None)
+
+    required_cols = ["Open", "High", "Low", "Close"]
     df.dropna(subset=required_cols, inplace=True)
-    
+
     if df.empty:
         return None
-        
+
+    # --- Layer-2：補今日盤中快照 ---
+    today_dt = pd.Timestamp(date.today()).tz_localize(None)
+    if today_dt not in df.index:
+        snap = fetch_single_stock_ohlcv(pure_id)
+        if snap and snap.get("Close", 0) > 0:
+            today_row = pd.DataFrame(
+                [{
+                    "Open": snap["Open"],
+                    "High": snap["High"],
+                    "Low": snap["Low"],
+                    "Close": snap["Close"],
+                    "Volume": snap["Volume"],
+                }],
+                index=[today_dt],
+            )
+            today_row.index.name = "Date"
+            df = pd.concat([df, today_row])
+            print(f"[fetch_data] {pure_id} 已補入今日快照 Close={snap['Close']}")
+        else:
+            print(f"[fetch_data] {pure_id} 無法取得今日快照，僅用歷史資料")
+
     return df
 
 def get_symbol_name(stock_id: str) -> str:
-    """ 嘗試獲取股票名稱 """
-    try:
-        stock_id = str(stock_id).strip()
-        symbols = [f"{stock_id}.TW", f"{stock_id}.TWO"] if stock_id.isdigit() else [stock_id]
-        
-        for sym in symbols:
-            ticker = yf.Ticker(sym)
-            try:
-                # 嘗試從特定欄位獲取名稱
-                info = ticker.info
-                name = info.get('longName') or info.get('shortName')
-                if name:
-                    return name
-            except:
-                continue
-        return ""
-    except:
-        return ""
+    """從 db_technical_prices.db 的 stock_info 表取得股票中文名稱。"""
+    pure_id = str(stock_id).strip().replace(".TWO", "").replace(".TW", "")
+    # 先查本地對照表（常用權值股快速回傳）
+    for suffix in (".TW", ".TWO", ""):
+        key = f"{pure_id}{suffix}"
+        if key in TW_NAMES:
+            return TW_NAMES[key]
+    # 再查資料庫
+    if os.path.exists(_TECH_DB_PATH):
+        try:
+            conn = sqlite3.connect(_TECH_DB_PATH)
+            row = pd.read_sql(
+                "SELECT name FROM stock_info WHERE stock_id = ? LIMIT 1",
+                conn,
+                params=[pure_id],
+            )
+            conn.close()
+            if not row.empty and row.iloc[0]["name"]:
+                return str(row.iloc[0]["name"])
+        except Exception:
+            pass
+    return ""
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -192,25 +225,9 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data['K'] = k_list
     data['D'] = d_list
     
-    # 8. 相對強度 RS (Relative Strength) vs TAIEX (^TWII)
-    try:
-        # 抓取大盤數據
-        twii = yf.download("^TWII", start=data.index[0], end=data.index[-1] + pd.Timedelta(days=1), progress=False)
-        if isinstance(twii.columns, pd.MultiIndex):
-            twii.columns = twii.columns.get_level_values(0)
-        
-        # 對齊日期
-        idx_close = twii['Close'].reindex(data.index).ffill()
-        
-        # 計算 RS 線 (以第一天為 100 作為基準以便觀察強度變化)
-        ratio = data['Close'] / idx_close
-        first_valid_ratio = ratio.dropna().iloc[0] if not ratio.dropna().empty else 1
-        data['RS'] = (ratio / first_valid_ratio) * 100
-        data['RS_MA20'] = data['RS'].rolling(window=20).mean()
-    except Exception as e:
-        print(f"RS 計算失敗: {e}")
-        data['RS'] = 0.0
-        data['RS_MA20'] = 0.0
+    # 8. 相對強度 RS：暫以 0 填充（已棄用 yfinance；未來可改由 DB 讀取 TAIEX 日 K）
+    data['RS'] = 0.0
+    data['RS_MA20'] = 0.0
 
     return data
 
@@ -852,43 +869,44 @@ class BollingerStrategy:
         merge_sinopac_change_pct_into_rows(results_list)
         return results_list, details_map
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_stock_data_with_name(ticker):
     """
-    獲取股票數據並回傳 (df, real_ticker, display_ticker)
+    取得股票 K 線資料與名稱。
+
+    資料來源：db_technical_prices.db（歷史日 K）+ Sinopac 即時快照（今日）。
+    回傳: (df_with_reset_index, real_ticker, pure_id, name)
     """
     try:
         t = str(ticker).strip()
-        symbols = [f"{t}.TW", f"{t}.TWO"] if t.isdigit() and len(t) == 4 else [t]
-        
-        df = pd.DataFrame()
-        final_t = symbols[0]
-        
-        for sym in symbols:
+        pure_id = t.replace(".TWO", "").replace(".TW", "")
+
+        # 決定市場後綴（上市 .TW / 上櫃 .TWO）
+        market_suffix = ".TW"
+        if os.path.exists(_TECH_DB_PATH):
             try:
-                stock = yf.Ticker(sym)
-                df = stock.history(period="250d")
-                if not df.empty:
-                    final_t = sym
-                    break
-            except:
-                continue
-        
-        if not df.empty:
-            # 優先從 Ticker.info 抓取名稱
-            name = ""
-            try:
-                stock_obj = yf.Ticker(final_t)
-                info = stock_obj.info
-                name = info.get('longName') or info.get('shortName', '')
-            except:
-                name = ""
-            
-            # 清理代號顯示 (移除 .TW .TWO)
-            pure_id = final_t.replace(".TW", "").replace(".TWO", "")
-            
-            return df.reset_index(), final_t, pure_id, name
-        return None, final_t, ticker, ""
+                conn = sqlite3.connect(_TECH_DB_PATH)
+                mrow = pd.read_sql(
+                    "SELECT market_type FROM stock_info WHERE stock_id = ? LIMIT 1",
+                    conn,
+                    params=[pure_id],
+                )
+                conn.close()
+                if not mrow.empty:
+                    mt = str(mrow.iloc[0]["market_type"]).strip()
+                    market_suffix = ".TW" if mt == "上市" else ".TWO"
+            except Exception:
+                pass
+
+        real_ticker = f"{pure_id}{market_suffix}"
+
+        df = fetch_data(pure_id, period="1y")
+        if df is None or df.empty:
+            return None, real_ticker, pure_id, ""
+
+        name = get_symbol_name(pure_id)
+        return df.reset_index(), real_ticker, pure_id, name
+
     except Exception:
         return None, ticker, ticker, ""
 

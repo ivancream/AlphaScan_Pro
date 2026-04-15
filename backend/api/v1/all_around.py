@@ -18,20 +18,29 @@ async def all_around_ticker_ws(websocket: WebSocket):
     """
     全方位即時 Tick 串流。
 
+    Query params:
+      symbols        逗號分隔的股票代碼（可選）
+      include_futures 是否包含期貨 tick（true/false）
+      history_limit   回補歷史筆數上限（預設 120，最大 500）
+
     訊息格式（JSON）:
     {
-        "ts":         "2024-03-15T09:05:01Z",
+        "ts":         "09:05:01",
         "symbol":     "2330",
         "name":       "台積電",
-        "asset_type": "STOCK",   // STOCK | WARRANT | FUTURES
+        "asset_type": "現貨",    // 現貨 | 期貨 | 認購 | 認售
         "price":      850.0,
-        "volume":     5,          // 張 (股票) / 口 (期貨)
-        "tick_type":  "BUY_UP"   // BUY_UP | SELL_DOWN | NEUTRAL
+        "volume":     5,
+        "tick_dir":   "OUTER",   // OUTER | INNER | NONE
+        "chg_type":   "UP",      // LIMIT_UP | UP | FLAT | DOWN | LIMIT_DOWN
+        "pct_chg":    1.23
     }
     """
     await websocket.accept()
     raw_symbols = websocket.query_params.get("symbols", "")
-    include_futures = websocket.query_params.get("include_futures", "false").lower() in ("1", "true", "yes")
+    include_futures = websocket.query_params.get("include_futures", "false").lower() in (
+        "1", "true", "yes",
+    )
     history_limit = int(websocket.query_params.get("history_limit", "120") or 120)
 
     stock_symbols = {
@@ -54,11 +63,14 @@ async def all_around_ticker_ws(websocket: WebSocket):
 
         while True:
             tick = await subscription.get()
-            if stock_symbols and tick.get("symbol") in stock_symbols:
+            sym = tick.get("symbol", "")
+            asset = tick.get("asset_type", "")
+
+            if stock_symbols and sym in stock_symbols:
                 await websocket.send_json(tick)
                 continue
 
-            if include_futures and tick.get("asset_type") == "FUTURES":
+            if include_futures and asset == "期貨":
                 await websocket.send_json(tick)
                 continue
 

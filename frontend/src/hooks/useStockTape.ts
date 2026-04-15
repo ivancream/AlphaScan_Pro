@@ -71,12 +71,12 @@ export function useStockTape(symbol: string) {
   }, [normalizedSymbol]);
 
   const stockTicks = useMemo(
-    () => ticks.filter((tick) => tick.asset_type === 'STOCK' && tick.symbol === normalizedSymbol),
+    () => ticks.filter((tick) => tick.asset_type === '現貨' && tick.symbol === normalizedSymbol),
     [ticks, normalizedSymbol],
   );
 
   const futuresTicks = useMemo(
-    () => ticks.filter((tick) => tick.asset_type === 'FUTURES'),
+    () => ticks.filter((tick) => tick.asset_type === '期貨'),
     [ticks],
   );
 
