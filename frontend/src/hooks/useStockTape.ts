@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { UnifiedTick } from '@/types/quote';
 
+import { wsUrl } from '@/lib/apiBase';
+
 type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
 
 const RECONNECT_MS = 2500;
@@ -27,7 +29,7 @@ export function useStockTape(symbol: string) {
         include_futures: 'true',
         history_limit: '180',
       });
-      const ws = new WebSocket(`ws://localhost:8000/ws/all-around-ticker?${params.toString()}`);
+      const ws = new WebSocket(`${wsUrl('/ws/all-around-ticker')}?${params.toString()}`);
       wsRef.current = ws;
 
       ws.onopen = () => {

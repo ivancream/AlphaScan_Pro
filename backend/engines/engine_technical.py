@@ -1,22 +1,20 @@
 # engine_technical.py
 import os
-import sqlite3
 from datetime import date, timedelta
 import pandas as pd
 import numpy as np
 import google.generativeai as genai
-import streamlit as st
 from typing import Tuple, List, Dict, Optional, Any
 from . import prompts
 from .sinopac_snapshots import (
     merge_sinopac_change_pct_into_rows,
     fetch_single_stock_ohlcv,
 )
+from .disposition_overlay import enrich_scan_rows_disposition
 import pandas_ta as ta
 
-# 資料庫路徑（相對於專案根目錄）
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_TECH_DB_PATH = os.path.join(_PROJECT_ROOT, "databases", "db_technical_prices.db")
+from backend.db import queries as _db_queries
+from backend.db.symbol_utils import strip_suffix as _strip_suffix
 
 # 常用權值股中文名稱對照表 (當 yfinance 抓不到中文時的備案)
 TW_NAMES = {
@@ -52,105 +50,60 @@ def fetch_data(stock_id: str, period: str = "1y") -> Optional[pd.DataFrame]:
     """
     【雙層快取架構】取得技術分析用的完整 K 線 DataFrame。
 
-    Layer-1（歷史層）：從 db_technical_prices.db 的 daily_price 表讀取截至
-        「昨日」為止的日 K，資料穩定且無延遲。
-    Layer-2（即時層）：呼叫永豐 Sinopac snapshot API 取得今日盤中最新
-        OHLCV，append 為 DataFrame 最後一筆，讓指標計算能反映即時價格。
-        若 API 不可用（未設定憑證 / 盤後），則跳過今日快照，僅用歷史資料。
-
-    完全棄用 yfinance。
+    Layer-1（歷史層）：從 DuckDB daily_prices 讀取截至昨日的 K 線。
+    Layer-2（即時層）：補入今日永豐 Sinopac snapshot，讓指標反映即時價格。
     """
-    raw_id = str(stock_id).strip()
-    # 剝除 .TW / .TWO 後綴，取純數字代碼供 DB 查詢
-    pure_id = raw_id.replace(".TWO", "").replace(".TW", "")
-
-    if not os.path.exists(_TECH_DB_PATH):
-        print(f"[fetch_data] 找不到資料庫: {_TECH_DB_PATH}")
-        return None
-
-    start_date = _period_to_start_date(period)
+    pure_id = _strip_suffix(str(stock_id).strip())
 
     try:
-        conn = sqlite3.connect(_TECH_DB_PATH)
-        yesterday = date.today() - timedelta(days=1)
-        df = pd.read_sql(
-            """
-            SELECT date AS Date, open AS Open, high AS High,
-                   low AS Low, close AS Close, volume AS Volume
-            FROM daily_price
-            WHERE stock_id = ?
-              AND date >= ?
-              AND date <= ?
-            ORDER BY date ASC
-            """,
-            conn,
-            params=[pure_id, start_date.isoformat(), yesterday.isoformat()],
-        )
-        conn.close()
+        df_raw = _db_queries.get_price_df(pure_id, period=period)
     except Exception as exc:
-        print(f"[fetch_data] 讀取 DB 失敗 ({pure_id}): {exc}")
+        print(f"[fetch_data] DuckDB 讀取失敗 ({pure_id}): {exc}")
         return None
 
-    if df is None or df.empty:
+    if df_raw is None or df_raw.empty:
         print(f"[fetch_data] DB 無資料: {pure_id}")
         return None
 
-    df["Date"] = pd.to_datetime(df["Date"])
-    df.set_index("Date", inplace=True)
+    df_raw["date"] = pd.to_datetime(df_raw["date"])
+    df = df_raw.rename(columns={
+        "date": "Date", "open": "Open", "high": "High",
+        "low": "Low", "close": "Close", "volume": "Volume",
+    })
+    df = df.set_index("Date")
     df.index = df.index.tz_localize(None)
-
-    required_cols = ["Open", "High", "Low", "Close"]
-    df.dropna(subset=required_cols, inplace=True)
+    df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
 
     if df.empty:
         return None
 
-    # --- Layer-2：補今日盤中快照 ---
+    # Layer-2: today's intraday snapshot
     today_dt = pd.Timestamp(date.today()).tz_localize(None)
     if today_dt not in df.index:
         snap = fetch_single_stock_ohlcv(pure_id)
         if snap and snap.get("Close", 0) > 0:
             today_row = pd.DataFrame(
-                [{
-                    "Open": snap["Open"],
-                    "High": snap["High"],
-                    "Low": snap["Low"],
-                    "Close": snap["Close"],
-                    "Volume": snap["Volume"],
-                }],
+                [{"Open": snap["Open"], "High": snap["High"],
+                  "Low": snap["Low"], "Close": snap["Close"],
+                  "Volume": snap["Volume"]}],
                 index=[today_dt],
             )
             today_row.index.name = "Date"
             df = pd.concat([df, today_row])
-            print(f"[fetch_data] {pure_id} 已補入今日快照 Close={snap['Close']}")
+            print(f"[fetch_data] {pure_id} 補入今日快照 Close={snap['Close']}")
         else:
-            print(f"[fetch_data] {pure_id} 無法取得今日快照，僅用歷史資料")
+            print(f"[fetch_data] {pure_id} 無今日快照，使用歷史資料")
 
     return df
 
 def get_symbol_name(stock_id: str) -> str:
-    """從 db_technical_prices.db 的 stock_info 表取得股票中文名稱。"""
-    pure_id = str(stock_id).strip().replace(".TWO", "").replace(".TW", "")
+    """從 DuckDB stock_info 取得股票中文名稱。"""
+    pure_id = _strip_suffix(str(stock_id).strip())
     # 先查本地對照表（常用權值股快速回傳）
     for suffix in (".TW", ".TWO", ""):
-        key = f"{pure_id}{suffix}"
-        if key in TW_NAMES:
-            return TW_NAMES[key]
-    # 再查資料庫
-    if os.path.exists(_TECH_DB_PATH):
-        try:
-            conn = sqlite3.connect(_TECH_DB_PATH)
-            row = pd.read_sql(
-                "SELECT name FROM stock_info WHERE stock_id = ? LIMIT 1",
-                conn,
-                params=[pure_id],
-            )
-            conn.close()
-            if not row.empty and row.iloc[0]["name"]:
-                return str(row.iloc[0]["name"])
-        except Exception:
-            pass
-    return ""
+        if f"{pure_id}{suffix}" in TW_NAMES:
+            return TW_NAMES[f"{pure_id}{suffix}"]
+    return _db_queries.get_stock_name(pure_id)
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -342,7 +295,11 @@ class BollingerStrategy:
     @classmethod
     def analyze(cls, df, upper_slope_threshold=0.003, vol_surge_multiplier=1.5):
         df = cls.calculate_indicators(df)
-        
+        return cls.analyze_from_computed(df, upper_slope_threshold, vol_surge_multiplier)
+
+    @classmethod
+    def analyze_from_computed(cls, df, upper_slope_threshold=0.003, vol_surge_multiplier=1.5):
+        """Judgment logic only — assumes df already has indicator columns."""
         required_cols = ['Upper', 'Lower', 'MA20', 'Bandwidth_Pct', 'Volume_MA5']
         if df is None or not all(col in df.columns for col in required_cols) or len(df) < 2:
             return False, {}, df
@@ -410,41 +367,9 @@ class BollingerStrategy:
 
     @classmethod
     def get_chip_metrics(cls, stock_id: str):
-        """
-        取得該股票的最新集保數據與變動
-        """
-        import sqlite3
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        chip_db_path = os.path.join(project_root, "databases", "db_chips_ownership.db")
-        if not os.path.exists(chip_db_path):
-            return None
-        
-        try:
-            conn = sqlite3.connect(chip_db_path)
-            # 抓取最近兩週數據來比較
-            df = pd.read_sql(
-                f"SELECT date, retail_pct, whale_1000_pct FROM tdcc_dist WHERE stock_id='{stock_id}' ORDER BY date DESC LIMIT 2",
-                conn
-            )
-            conn.close()
-            
-            if len(df) < 2:
-                return None
-            
-            latest = df.iloc[0]
-            prev = df.iloc[1]
-            
-            retail_diff = latest['retail_pct'] - prev['retail_pct']
-            whale_diff = latest['whale_1000_pct'] - prev['whale_1000_pct']
-            
-            return {
-                "retail_chg": round(retail_diff, 2),
-                "whale_chg": round(whale_diff, 2),
-                "is_retail_up": retail_diff > 0,
-                "is_whale_down": whale_diff < 0
-            }
-        except Exception:
-            return None
+        """取得最新集保數據與週變動（從 DuckDB tdcc_distribution）。"""
+        pure_id = _strip_suffix(str(stock_id).strip())
+        return _db_queries.get_chip_metrics(pure_id)
 
     @classmethod
     def analyze_short(cls, df):
@@ -455,7 +380,11 @@ class BollingerStrategy:
                 (position_ratio = (Close - Lower) / (Middle - Lower) < 0.4)
         """
         df = cls.calculate_indicators(df)
-        
+        return cls.analyze_short_from_computed(df)
+
+    @classmethod
+    def analyze_short_from_computed(cls, df):
+        """Judgment logic only — assumes df already has indicator columns."""
         required_cols = ['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Upper', 'Lower']
         if df is None or not all(col in df.columns for col in required_cols) or len(df) < 2:
             return False, {}, df
@@ -524,7 +453,6 @@ class BollingerStrategy:
         strategy: str = "long",
         slope_val: float = 0.003,
         vol_mul: float = 1.5,
-        # 新增選配過濾條件 (由前端勾選決定)
         req_ma: bool = True,
         req_vol: bool = True,
         req_slope: bool = True,
@@ -532,18 +460,31 @@ class BollingerStrategy:
         req_near_band: bool = True,
         progress_callback=None
     ) -> Tuple[List[Dict], Dict[str, Dict]]:
-        """
-        從資料庫海選股票，並套用動態過濾條件。
-        """
-        import sqlite3
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        db_path = os.path.join(project_root, "databases", "db_technical_prices.db")
-        
-        if not os.path.exists(db_path):
+        """從 DuckDB 海選股票，並套用動態過濾條件。"""
+        # Load all history from DuckDB (single batch read)
+        all_history_df = _db_queries.get_price_df_all(cutoff_days=500)
+        if all_history_df.empty:
             return [], {}
 
-        conn = sqlite3.connect(db_path)
-        stock_info = pd.read_sql("SELECT stock_id, name, market_type FROM stock_info", conn)
+        stock_info_df = _db_queries.get_stock_info_df()
+        stock_info = stock_info_df.rename(columns={"market": "market_type"}) if not stock_info_df.empty else pd.DataFrame()
+
+        # Minimal adapter to use same logic below
+        class _FakeConn:
+            def close(self): pass
+
+        conn = _FakeConn()
+
+        # Preload price data per stock
+        _price_cache: Dict[str, pd.DataFrame] = {}
+        for sid, grp in all_history_df.groupby("stock_id"):
+            sub = grp.drop(columns=["stock_id"]).reset_index(drop=True)
+            sub.columns = [c.capitalize() if c in ("date","open","high","low","close","volume") else c for c in sub.columns]
+            sub.rename(columns={"Date": "Date", "Disposition_mins": "Disposition_Mins"}, inplace=True, errors="ignore")
+            _price_cache[str(sid)] = sub
+
+        def _read_price(stock_id: str) -> pd.DataFrame:
+            return _price_cache.get(stock_id, pd.DataFrame())
         
         def is_eligible(sid, sname):
             if any(c.isalpha() for c in sid):
@@ -554,14 +495,19 @@ class BollingerStrategy:
             return True
 
         stock_info = stock_info[stock_info.apply(lambda x: is_eligible(x['stock_id'], x['name']), axis=1)]
-        
+
         total = len(stock_info)
         results_list = []
         details_map = {}
         min_rows = 120 if strategy == "short" else 60
-        
-        global_max_date = pd.read_sql("SELECT MAX(date) FROM daily_price", conn).iloc[0, 0]
-        max_date_limit = pd.to_datetime(global_max_date) - pd.Timedelta(days=5) if global_max_date else None
+
+        max_date_limit = None
+        if _price_cache:
+            all_last = [g["Date"].max() if "Date" in g.columns else g.iloc[:, 0].max()
+                        for g in _price_cache.values() if not g.empty]
+            if all_last:
+                global_max = pd.to_datetime(max(all_last))
+                max_date_limit = global_max - pd.Timedelta(days=5)
 
         for idx, row in stock_info.iterrows():
             stock_id = row["stock_id"]
@@ -570,10 +516,11 @@ class BollingerStrategy:
 
             if progress_callback: progress_callback(idx + 1, total, f"{stock_id} {name}")
 
-            df = pd.read_sql(f"SELECT date, open, high, low, close, volume FROM daily_price WHERE stock_id='{stock_id}' ORDER BY date ASC", conn)
+            df = _read_price(stock_id)
             if df.empty or len(df) < min_rows: continue
 
-            df.columns = ["Date", "Open", "High", "Low", "Close", "Volume"]
+            if "Date" not in df.columns:
+                df.columns = ["Date", "Open", "High", "Low", "Close", "Volume"] + list(df.columns[6:])
             df["Date"] = pd.to_datetime(df["Date"])
             if max_date_limit and df["Date"].iloc[-1] < max_date_limit: continue
 
@@ -610,24 +557,24 @@ class BollingerStrategy:
             if strategy == "short":
                 if req_chips and chip_cond != "🔥": continue
 
-            # 計算今日漲跌幅
             today_close = full_df.iloc[-1]['Close']
             yes_close = full_df.iloc[-2]['Close'] if len(full_df) >= 2 else today_close
-            change_pct = round((today_close - yes_close) / yes_close * 100, 2) if yes_close > 0 else 0
+            if yes_close > 0:
+                raw_pct = (today_close - yes_close) / yes_close * 100
+                change_pct = round(max(-10.0, min(10.0, raw_pct)), 2)
+            else:
+                change_pct = 0
 
-            # 取得資料日期 (最後一筆 K 棒的日期)
             data_date = pd.to_datetime(full_df.iloc[-1]['Date']).strftime('%Y-%m-%d') if 'Date' in full_df.columns else ''
 
-            # 取得產業分類
             try:
                 import twstock
                 tw_codes = twstock.codes
                 industry = getattr(tw_codes.get(stock_id), "group", "其他") if tw_codes.get(stock_id) else "其他"
-            except:
+            except Exception:
                 industry = "其他"
 
-            # 組裝結果 (多方 / 空方欄位不同)
-            suffix = ".TW" if market == "上市" else ".TWO"
+            suffix = ".TWO" if market in ("OTC", "上櫃") else ".TW"
             real_ticker = f"{stock_id}{suffix}"
 
             if strategy == "long":
@@ -683,7 +630,6 @@ class BollingerStrategy:
                 "industry": industry
             }
 
-        conn.close()
         merge_sinopac_change_pct_into_rows(results_list)
         return results_list, details_map
 
@@ -699,7 +645,11 @@ class BollingerStrategy:
             位階 < 4 表示收盤價尚未接近上軌區間
         """
         df = cls.calculate_indicators(df)
+        return cls.analyze_wanderer_from_computed(df)
 
+    @classmethod
+    def analyze_wanderer_from_computed(cls, df):
+        """Judgment logic only — assumes df already has indicator columns."""
         required_cols = ['MA20', 'Upper', 'Lower']
         if df is None or not all(col in df.columns for col in required_cols) or len(df) < 2:
             return False, {}, df
@@ -759,19 +709,23 @@ class BollingerStrategy:
         req_bb_level: bool = True,
         progress_callback=None
     ) -> Tuple[List[Dict], Dict[str, Dict]]:
-        """
-        浪子回頭策略海選，支援動態參數過濾。
-        """
-        import sqlite3
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        db_path = os.path.join(project_root, 'databases', 'db_technical_prices.db')
-        
-        if not os.path.exists(db_path):
+        """浪子回頭策略海選（DuckDB batch read）。"""
+        all_history_df = _db_queries.get_price_df_all(cutoff_days=500)
+        if all_history_df.empty:
             return [], {}
 
-        conn = sqlite3.connect(db_path)
-        stock_info = pd.read_sql('SELECT stock_id, name, market_type FROM stock_info', conn)
-        
+        stock_info_df = _db_queries.get_stock_info_df()
+        stock_info = stock_info_df.rename(columns={"market": "market_type"}) if not stock_info_df.empty else pd.DataFrame()
+
+        _price_cache: Dict[str, pd.DataFrame] = {}
+        for sid, grp in all_history_df.groupby("stock_id"):
+            sub = grp.drop(columns=["stock_id"]).reset_index(drop=True)
+            sub.columns = [c.capitalize() if c in ("date","open","high","low","close","volume") else c for c in sub.columns]
+            sub.rename(columns={"Disposition_mins": "Disposition_Mins"}, inplace=True, errors="ignore")
+            if "Disposition_Mins" not in sub.columns:
+                sub["Disposition_Mins"] = 0
+            _price_cache[str(sid)] = sub
+
         def is_eligible(sid, sname):
             if any(c.isalpha() for c in sid):
                 if not (len(sid) == 6 and sid.endswith('A') and sid[:-1].isdigit()): return False
@@ -781,13 +735,19 @@ class BollingerStrategy:
             return True
 
         stock_info = stock_info[stock_info.apply(lambda x: is_eligible(x['stock_id'], x['name']), axis=1)]
-        
+
         total = len(stock_info)
         results_list = []
         details_map = {}
-        
-        global_max_date = pd.read_sql("SELECT MAX(date) FROM daily_price", conn).iloc[0, 0]
-        max_date_limit = pd.to_datetime(global_max_date) - pd.Timedelta(days=5) if global_max_date else None
+
+        max_date_limit = None
+        if _price_cache:
+            all_last = []
+            for g in _price_cache.values():
+                if not g.empty and "Date" in g.columns:
+                    all_last.append(g["Date"].max())
+            if all_last:
+                max_date_limit = pd.to_datetime(max(all_last)) - pd.Timedelta(days=5)
 
         for idx, row in stock_info.iterrows():
             stock_id = row['stock_id']
@@ -796,13 +756,11 @@ class BollingerStrategy:
 
             if progress_callback: progress_callback(idx + 1, total, f'{stock_id} {name}')
 
-            df = pd.read_sql(
-                f"SELECT date, open, high, low, close, volume, IFNULL(disposition_mins, 0) as disposition_mins FROM daily_price WHERE stock_id='{stock_id}' ORDER BY date ASC",
-                conn
-            )
+            df = _price_cache.get(stock_id, pd.DataFrame())
             if df.empty or len(df) < 60: continue
 
-            df.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Disposition_Mins']
+            if "Date" not in df.columns:
+                df.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Disposition_Mins'][:len(df.columns)]
             df['Date'] = pd.to_datetime(df['Date'])
             if max_date_limit and df["Date"].iloc[-1] < max_date_limit: continue
 
@@ -820,15 +778,14 @@ class BollingerStrategy:
             yes_close = full_df.iloc[-2]['Close'] if len(full_df) >= 2 else today_close
             change_pct = round((today_close - yes_close) / yes_close * 100, 2) if yes_close > 0 else 0
 
-            suffix = '.TW' if market == '上市' else '.TWO'
+            suffix = '.TWO' if market in ('OTC', '上櫃') else '.TW'
             real_ticker = f'{stock_id}{suffix}'
 
-            # 取得產業分類
             try:
                 import twstock
                 tw_codes = twstock.codes
                 industry = getattr(tw_codes.get(stock_id), "group", "其他") if tw_codes.get(stock_id) else "其他"
-            except:
+            except Exception:
                 industry = "其他"
 
             # 讀取最後一天的處置狀態
@@ -865,48 +822,43 @@ class BollingerStrategy:
                 'industry': industry
             }
 
-        conn.close()
+        enrich_scan_rows_disposition(results_list)
         merge_sinopac_change_pct_into_rows(results_list)
         return results_list, details_map
 
-@st.cache_data(ttl=1800)
+
+# Simple in-memory TTL cache (replaces streamlit @st.cache_data)
+_stock_data_cache: Dict[str, tuple] = {}
+_stock_data_ts: Dict[str, float] = {}
+_CACHE_TTL = 1800  # 30 min
+
+
 def get_stock_data_with_name(ticker):
     """
     取得股票 K 線資料與名稱。
-
-    資料來源：db_technical_prices.db（歷史日 K）+ Sinopac 即時快照（今日）。
     回傳: (df_with_reset_index, real_ticker, pure_id, name)
     """
+    import time
+    now = time.time()
+    if ticker in _stock_data_cache and now - _stock_data_ts.get(ticker, 0) < _CACHE_TTL:
+        return _stock_data_cache[ticker]
+
     try:
-        t = str(ticker).strip()
-        pure_id = t.replace(".TWO", "").replace(".TW", "")
-
-        # 決定市場後綴（上市 .TW / 上櫃 .TWO）
-        market_suffix = ".TW"
-        if os.path.exists(_TECH_DB_PATH):
-            try:
-                conn = sqlite3.connect(_TECH_DB_PATH)
-                mrow = pd.read_sql(
-                    "SELECT market_type FROM stock_info WHERE stock_id = ? LIMIT 1",
-                    conn,
-                    params=[pure_id],
-                )
-                conn.close()
-                if not mrow.empty:
-                    mt = str(mrow.iloc[0]["market_type"]).strip()
-                    market_suffix = ".TW" if mt == "上市" else ".TWO"
-            except Exception:
-                pass
-
-        real_ticker = f"{pure_id}{market_suffix}"
+        pure_id = _strip_suffix(str(ticker).strip())
+        market = _db_queries.get_stock_market(pure_id)
+        suffix = ".TWO" if market == "OTC" else ".TW"
+        real_ticker = f"{pure_id}{suffix}"
 
         df = fetch_data(pure_id, period="1y")
         if df is None or df.empty:
-            return None, real_ticker, pure_id, ""
+            result = (None, real_ticker, pure_id, "")
+        else:
+            name = get_symbol_name(pure_id)
+            result = (df.reset_index(), real_ticker, pure_id, name)
 
-        name = get_symbol_name(pure_id)
-        return df.reset_index(), real_ticker, pure_id, name
-
+        _stock_data_cache[ticker] = result
+        _stock_data_ts[ticker] = now
+        return result
     except Exception:
         return None, ticker, ticker, ""
 

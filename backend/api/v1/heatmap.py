@@ -6,14 +6,12 @@
 - GET  /api/v1/heatmap/data     — 取得熱力圖數據 (含三層產業分類 + 漲跌幅/成交金額)
 """
 
-import os
-import sys
 from typing import Dict, Any, List, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from engines import engine_heatmap
+from backend.engines import engine_heatmap
 
 router = APIRouter()
 
@@ -27,7 +25,7 @@ class HeatmapStock(BaseModel):
     meso: str
     micro: str
     close: float
-    change_pct: float
+    change_pct: Optional[float] = None  # 資料異常時為 None，不列入板塊加權
     turnover: int
     volume: int
 
@@ -35,6 +33,11 @@ class HeatmapDataResponse(BaseModel):
     date: Optional[str]
     stocks: List[Dict[str, Any]]
     message: Optional[str] = None
+    as_of_date: Optional[str] = None
+    data_freshness: Optional[str] = None
+    # duckdb_daily_prices；盤中由排程批次寫入，非本端點即時打 yfinance/Shioaji
+    price_source: Optional[str] = None
+    ingest_path: Optional[str] = None
 
 # ==========================================
 # Endpoints
@@ -42,8 +45,8 @@ class HeatmapDataResponse(BaseModel):
 @router.get("/api/v1/heatmap/data", response_model=HeatmapDataResponse)
 async def get_heatmap_data():
     """
-    取得熱力圖數據。
-    回傳即時分類好的股票最新日漲跌幅、成交金額等，供前端 Treemap 渲染。
+    取得資金流向數據（全市場漲跌幅、成交金額、三層產業標籤）。
+    價量僅讀 DuckDB daily_prices（由排程批次 snapshots／yf batch 寫入）；不經 LiveQuote 快取。
     """
     try:
         data = engine_heatmap.get_heatmap_data()

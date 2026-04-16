@@ -10,7 +10,7 @@
 import { create } from 'zustand';
 import type { UnifiedTick } from '@/types/quote';
 
-const WS_URL        = 'ws://localhost:8000/ws/all-around-ticker';
+import { wsUrl } from '@/lib/apiBase';
 const MAX_TICKS     = 500;
 const FLUSH_MS      = 100;   // 節流間隔
 const RECONNECT_MS  = 3000;
@@ -87,7 +87,7 @@ export const useAllAroundStore = create<AllAroundState>((set, get) => ({
 
     set({ connectionState: 'connecting' });
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(wsUrl('/ws/all-around-ticker'));
     _ws = ws;
 
     ws.onopen = () => {

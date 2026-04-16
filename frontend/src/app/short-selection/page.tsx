@@ -118,7 +118,7 @@ export default function SwingShortPage() {
                 <div>
                     <h2 className="text-3xl font-bold text-white tracking-widest flex items-center gap-3">
                         <span className="w-1.5 h-8 bg-green-500 rounded-full inline-block"></span>
-                        波段空方選股策略
+                        空方選股策略
                     </h2>
                 </div>
                 <button
@@ -149,7 +149,7 @@ export default function SwingShortPage() {
             {/* 策略篩選與參數配置 */}
             <div className="bg-[#161B22] border border-green-800/40 rounded-xl p-5 space-y-4">
                 <div className="flex justify-between items-center border-b border-gray-800 pb-2">
-                    <p className="text-green-400 font-bold text-sm tracking-wider uppercase">策略篩選條件 (預設全選)</p>
+                    <p className="text-green-400 font-bold text-sm tracking-wider uppercase">策略篩選條件</p>
                     <span className="text-xs text-gray-500 italic">勾選後將僅顯示符合該條件的標的</span>
                 </div>
                 
@@ -217,13 +217,9 @@ export default function SwingShortPage() {
                                         <th className="px-6 py-4">代號</th>
                                         <th className="px-6 py-4">名稱</th>
                                         <th className="px-6 py-4">產業</th>
-                                        <th className="px-6 py-4">收盤價</th>
+                                        <th className="px-6 py-4">股價</th>
                                         <th className="px-6 py-4">漲跌幅</th>
                                         <th className="px-6 py-4">成交量(張)</th>
-                                        <th className="px-6 py-4 text-green-400">均線空排</th>
-                                        <th className="px-6 py-4 text-green-400">月線下彎</th>
-                                        <th className="px-6 py-4 text-green-400">籌碼渙散</th>
-                                        <th className="px-6 py-4">沿下軌</th>
                                         <th className="px-6 py-4">大戶變動</th>
                                         <th className="px-6 py-4">散戶變動</th>
                                     </tr>
@@ -253,13 +249,9 @@ export default function SwingShortPage() {
                                             </td>
                                             <td className="px-6 py-4 font-medium text-white">{item["名稱"]}</td>
                                             <td className="px-6 py-4 text-gray-400">{item['產業']}</td>
-                                            <td className="px-6 py-4 font-mono">{Number(item["收盤價"]).toFixed(1)}</td>
+                                            <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item["收盤價"]).toFixed(1)}</td>
                                             <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item['今日漲跌幅(%)']).toFixed(2)}%</td>
                                             <td className="px-6 py-4 font-mono">{Number(item['成交量(張)']).toLocaleString()}</td>
-                                            <td className="px-6 py-4 font-bold">{item["空頭排列"]}</td>
-                                            <td className="px-6 py-4 font-bold">{item["月線下彎"]}</td>
-                                            <td className="px-6 py-4 font-bold tracking-widest">{item["籌碼渙散"]}</td>
-                                            <td className="px-6 py-4 font-bold">{item["沿下軌"]}</td>
                                             <td className="px-6 py-4 font-mono text-blue-400">{item["大戶變動"]}</td>
                                             <td className="px-6 py-4 font-mono text-red-400">+{item["散戶變動"]}</td>
                                         </tr>

@@ -19,6 +19,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { IntradayRefreshBar } from '@/components/ui/IntradayRefreshBar';
 import { GlobalContextMenu } from '@/components/ui/GlobalContextMenu';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
+import { API_V1_BASE } from '@/lib/apiBase';
 
 type NavItem = { href: string; icon: React.ReactNode; label: string };
 type NavGroup = { title: string; subtitle: string; separated?: boolean; showStockNav?: boolean; items: NavItem[] };
@@ -93,7 +94,7 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
 
         try {
             const response = await fetch(
-                `http://localhost:8000/api/v1/market-data/resolve/${encodeURIComponent(query)}`,
+                `${API_V1_BASE}/market-data/resolve/${encodeURIComponent(query)}`,
             );
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {

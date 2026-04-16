@@ -1,0 +1,126 @@
+"""
+以 disposition_events（TWSE/TPEx 同步）補齊掃描結果的處置分鐘數。
+
+daily_prices.disposition_mins 常未回填，導致「處置狀態」一律為「-」。
+此模組在掃描／讀取快取時以交易所事件表覆寫顯示欄位。
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+
+from backend.db import queries as _db_queries
+
+
+def _to_date(val) -> Optional[date]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    ts = pd.to_datetime(val, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.date()
+
+
+def _event_end_date(raw) -> date:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return date(2099, 12, 31)
+    s = str(raw).strip()
+    if not s or s.lower() == "nan":
+        return date(2099, 12, 31)
+    ts = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(ts):
+        return date(2099, 12, 31)
+    return ts.date()
+
+
+def compute_event_disposition_map(hist_map: Dict[str, pd.DataFrame]) -> Dict[str, int]:
+    """
+    依每檔最後一根 K 的日期，查 disposition_events，回傳 {stock_id: 撮合分鐘數}。
+    僅包含目前落在處置區間內且 minutes > 0 的個股。
+    """
+    if not hist_map:
+        return {}
+
+    last_dates: List[date] = []
+    for df in hist_map.values():
+        if df is None or df.empty or "Date" not in df.columns:
+            continue
+        last_dates.append(pd.Timestamp(df["Date"].iloc[-1]).date())
+    if not last_dates:
+        return {}
+
+    d_min, d_max = min(last_dates), max(last_dates)
+    ev = _db_queries.get_disposition_events_overlapping(d_min, d_max)
+    if ev.empty:
+        return {}
+
+    out: Dict[str, int] = {}
+    for sid, df in hist_map.items():
+        if df is None or df.empty or "Date" not in df.columns:
+            continue
+        d = pd.Timestamp(df["Date"].iloc[-1]).date()
+        sub = ev[ev["stock_id"] == sid]
+        if sub.empty:
+            continue
+        best = 0
+        for _, row in sub.iterrows():
+            start_d = _to_date(row.get("disp_start"))
+            if start_d is None:
+                continue
+            end_d = _event_end_date(row.get("disp_end"))
+            if start_d <= d <= end_d:
+                best = max(best, int(row.get("minutes") or 0))
+        if best > 0:
+            out[str(sid)] = best
+    return out
+
+
+def enrich_scan_rows_disposition(rows: List[dict]) -> None:
+    """
+    就地更新掃描列：若列上已有「處置狀態」鍵，則依 disposition_events 與「資料日期」重算。
+    """
+    if not rows:
+        return
+    dated: List[Tuple[dict, str, date]] = []
+    for r in rows:
+        if "處置狀態" not in r:
+            continue
+        sid = str(r.get("代號", "")).strip()
+        d = _to_date(r.get("資料日期"))
+        if sid and d:
+            dated.append((r, sid, d))
+    if not dated:
+        return
+
+    d_min = min(t[2] for t in dated)
+    d_max = max(t[2] for t in dated)
+    ev = _db_queries.get_disposition_events_overlapping(d_min, d_max)
+    if ev.empty:
+        return
+
+    for r, sid, d in dated:
+        sub = ev[ev["stock_id"] == sid]
+        best = 0
+        for _, row in sub.iterrows():
+            start_d = _to_date(row.get("disp_start"))
+            if start_d is None:
+                continue
+            end_d = _event_end_date(row.get("disp_end"))
+            if start_d <= d <= end_d:
+                best = max(best, int(row.get("minutes") or 0))
+        if best > 0:
+            r["處置狀態"] = f"每 {best} 分鐘撮合"
+            r["is_disposition"] = True
+        else:
+            cur = str(r.get("處置狀態", "") or "")
+            if cur.startswith("每 ") and "分鐘撮合" in cur:
+                r["is_disposition"] = True
+                continue
+            r["處置狀態"] = "-"
+            r["is_disposition"] = False

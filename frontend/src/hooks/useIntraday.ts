@@ -1,7 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 
-const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' });
+import { API_V1_BASE } from '@/lib/apiBase';
+
+const api = axios.create({ baseURL: API_V1_BASE });
 
 export interface IntradayStatus {
     status: 'idle' | 'running' | 'done' | 'error';

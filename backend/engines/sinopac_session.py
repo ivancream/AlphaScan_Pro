@@ -30,8 +30,8 @@ Shioaji 的 @api.on_tick_stk_v1() 與 @api.on_tick_fop_v1() 每次呼叫都會
     def _master_tick(exchange, tick):
         sinopac_session.dispatch_stk_tick(exchange, tick)
 
-    sinopac_session.add_stk_handler(live_quote_engine._on_tick_handler)
-    sinopac_session.add_stk_handler(all_around_engine._on_tick_handler)
+    sinopac_session.add_stk_handler(live_quote_engine._shioaji._handle_tick_sync)
+    sinopac_session.add_stk_handler(all_around_engine._dispatch_stk_sync)
 
 本模組已實作此 dispatch 機制，引擎只需呼叫 add_stk_handler / add_fop_handler
 即可安全地共享同一個 Tick 推播流。

@@ -15,7 +15,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 
-const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' });
+import { API_V1_BASE } from '@/lib/apiBase';
+
+const api = axios.create({ baseURL: API_V1_BASE });
 
 const STATIC_STALE   = 12 * 60 * 60 * 1000;   // 12 小時
 const STATIC_GC      = 13 * 60 * 60 * 1000;   // 13 小時

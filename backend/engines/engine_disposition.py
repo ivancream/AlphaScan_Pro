@@ -10,7 +10,6 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import sqlite3
 import requests
 import re
 from datetime import date, timedelta
@@ -23,12 +22,15 @@ warnings.filterwarnings("ignore")
 # ──────────────────────────────────────────────────────
 # 設定
 # ──────────────────────────────────────────────────────
-PRE_DAYS = 2       # 處置前觀察天數
-POST_DAYS = 2      # 處置後觀察天數 (使用者需求: 前兩天到出關後兩天)
-DATA_BUFFER = 30   # 向前多抓幾個交易日以確保有足夠資料
+PRE_DAYS = 2
+POST_DAYS = 2
+DATA_BUFFER = 30
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
-DB_PATH = PROJECT_ROOT / "databases" / "db_technical_prices.db"
+
+# DB_PATH 保留供舊版 yfinance 價格查詢路徑（disposition 分析仍用 yfinance）
+# 事件儲存改用 DuckDB
+from backend.db import writer as _db_writer, queries as _db_queries
 
 try:
     import pandas_market_calendars as mcal
@@ -64,67 +66,53 @@ def find_nth_trading_day(ref_date: date, n: int, all_days: pd.DatetimeIndex) -> 
 
 
 # ──────────────────────────────────────────────────────
-# DB 操作
+# DB 操作  (DuckDB 版)
 # ──────────────────────────────────────────────────────
-def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 
 def ensure_table():
-    """確保 disposition_events 表存在"""
-    conn = _get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS disposition_events (
-            stock_id TEXT NOT NULL,
-            stock_name TEXT,
-            disp_start TEXT NOT NULL,
-            disp_end TEXT NOT NULL,
-            market TEXT,
-            source TEXT DEFAULT 'api',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (stock_id, disp_start)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    """DuckDB schema 由 init_duckdb() 在啟動時建立，此函式保留相容性。"""
+    pass  # no-op: schema managed by backend.db.connection.init_duckdb()
+
+
+def _mins_display_to_int(mins_label: str, measures: str = "") -> int:
+    """將 _parse_mins 回傳的文字標籤或處置條件全文轉成整數分鐘（0 表示未知／無法解析）。"""
+    t = (mins_label or "").strip()
+    if t.endswith("分") and len(t) > 1:
+        prefix = t[:-1]
+        if prefix.isdigit():
+            return int(prefix)
+    mapping = {"5分": 5, "10分": 10, "20分": 20}
+    if t in mapping:
+        return mapping[t]
+    text = measures or ""
+    for pat in (r"(\d+)\s*分鐘", r"每[^\d]*(\d+)\s*分"):
+        m = re.search(pat, text)
+        if m:
+            return int(m.group(1))
+    return 0
 
 
 def save_events_to_db(events: List[Dict]):
-    """將處置事件存入 DB (去重)"""
+    """將處置事件儲存到 DuckDB disposition_events。"""
     if not events:
         return
-    conn = _get_conn()
+    rows = []
     for ev in events:
-        try:
-            conn.execute("""
-                INSERT OR IGNORE INTO disposition_events 
-                (stock_id, stock_name, disp_start, disp_end, market, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                ev.get("stock_id", ""),
-                ev.get("stock_name", ""),
-                ev.get("disp_start", ""),
-                ev.get("disp_end", ""),
-                ev.get("market", ""),
-                ev.get("source", "api"),
-            ))
-        except Exception:
-            pass
-    conn.commit()
-    conn.close()
+        stock_id = ev.get("stock_id", "")
+        disp_start = ev.get("disp_start", "")
+        disp_end = ev.get("disp_end") or None
+        reason = ev.get("market", "") or ev.get("reason", "")
+        mins_int = _mins_display_to_int(str(ev.get("mins") or ""), str(ev.get("measures") or ""))
+        rows.append((stock_id, disp_start, disp_end, reason, mins_int))
+    try:
+        _db_writer.upsert_disposition_events(rows)
+    except Exception as exc:
+        print(f"[Disposition] save_events_to_db failed: {exc}")
 
 
 def get_stock_events_from_db(stock_id: str) -> List[Dict]:
-    """從 DB 取出某檔個股的所有處置事件"""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM disposition_events WHERE stock_id = ? ORDER BY disp_start ASC",
-        (stock_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """從 DuckDB 取出某檔個股的所有處置事件。"""
+    return _db_queries.get_disposition_events(stock_id)
 
 
 # ──────────────────────────────────────────────────────
@@ -293,24 +281,6 @@ def fetch_price(symbol_tw: str, start: str, end: str) -> pd.DataFrame:
         df.columns = df.columns.get_level_values(0)
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
-
-def fetch_price_from_db(stock_id: str, start: str, end: str) -> pd.DataFrame:
-    """優先從本地 DB 取價格，減少 yfinance 呼叫"""
-    if not DB_PATH.exists():
-        return pd.DataFrame()
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql(
-        "SELECT date, open, high, low, close, volume FROM daily_price "
-        "WHERE stock_id = ? AND date >= ? AND date <= ? ORDER BY date ASC",
-        conn, params=(stock_id, start, end)
-    )
-    conn.close()
-    if df.empty:
-        return pd.DataFrame()
-    df['date'] = pd.to_datetime(df['date'])
-    df.set_index('date', inplace=True)
-    df.columns = ["Open", "High", "Low", "Close", "Volume"]
-    return df
 
 
 # ──────────────────────────────────────────────────────
@@ -528,8 +498,19 @@ def search_and_analyze(stock_id: str, manual_events: list = None) -> dict:
     earliest = min(all_starts) - timedelta(days=DATA_BUFFER)
     latest = max(all_ends) + timedelta(days=POST_DAYS * 3 + 10)
 
-    # 優先從本地 DB 取價格
-    price_df = fetch_price_from_db(stock_id, str(earliest), str(latest))
+    # 從 DuckDB 取本地歷史價格，不足時 fallback yfinance
+    try:
+        from backend.db.queries import get_price_df as _get_price_df
+        price_df = _get_price_df(stock_id, start=str(earliest), end=str(latest))
+        if not price_df.empty:
+            price_df = price_df[["open", "high", "low", "close", "volume"]].rename(
+                columns={"open": "Open", "high": "High", "low": "Low",
+                         "close": "Close", "volume": "Volume"}
+            )
+        else:
+            price_df = pd.DataFrame()
+    except Exception:
+        price_df = pd.DataFrame()
     if price_df.empty or len(price_df) < 10:
         price_df = fetch_price(stock_id, str(earliest), str(latest + timedelta(days=1)))
 
@@ -566,3 +547,7 @@ def search_and_analyze(stock_id: str, manual_events: list = None) -> dict:
         "summary": summary,
         "found_count": len(events),
     }
+
+
+# Alias for scheduler compatibility
+fetch_and_save_current = fetch_current_dispositions_and_save

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LiveQuote, LiveSocketEvent } from '@/types/quote';
 
-type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
+import { wsUrl } from '@/lib/apiBase';
 
-const WS_URL = 'ws://localhost:8000/ws/live-quotes';
+type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
 const RECONNECT_MS = 2500;
 const THROTTLE_MS = 500;
 
@@ -54,7 +54,7 @@ export function useLiveQuotes(symbols?: string[]) {
       const query = symbolKey.length > 0
         ? `?symbols=${encodeURIComponent(symbolKey)}`
         : '';
-      const ws = new WebSocket(`${WS_URL}${query}`);
+      const ws = new WebSocket(`${wsUrl('/ws/live-quotes')}${query}`);
       wsRef.current = ws;
 
       ws.onopen = () => {

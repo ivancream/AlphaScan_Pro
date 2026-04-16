@@ -131,13 +131,8 @@ AlphaScan_Pro/
 │       ├── engine_global.py      # 全球市場指標
 │       ├── engine_heatmap.py     # 板塊熱力圖計算
 │       ├── engine_technical.py   # 技術指標計算 (最大引擎)
+│       ├── cb_crawler.py         # 可轉債爬蟲（SQLite cb.db）
 │       └── prompts.py            # Gemini 提示詞模板
-│
-├── core/                        # 系統核心層 (資料庫存取 / 控制器)
-│   ├── controller.py            # 主控制器
-│   ├── market_db.py             # 市場資料庫存取層
-│   ├── model.py                 # 資料模型定義
-│   └── cb_crawler.py            # 可轉債爬蟲
 │
 ├── databases/                   # 離線 SQLite 資料庫與爬蟲腳本
 │   ├── db_chips_ownership.db    # 籌碼持股資料庫

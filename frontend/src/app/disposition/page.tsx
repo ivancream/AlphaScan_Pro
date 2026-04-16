@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createChart, ColorType, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import { Search, Activity, Trash2, Plus, BarChart3, Info, List, X, ArrowUpRight, ArrowDownRight, ChevronDown, ChevronUp, Calendar } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
+import { API_V1_BASE } from '@/lib/apiBase';
 
 export default function DispositionPage() {
     const [symbol, setSymbol] = useState('');
@@ -23,7 +24,7 @@ export default function DispositionPage() {
     const fetchCurrentList = async () => {
         setListLoading(true);
         try {
-            const res = await fetch('http://localhost:8000/api/v1/disposition/current');
+            const res = await fetch(`${API_V1_BASE}/disposition/current`);
             const json = await res.json();
             if (json.status === 'success') setCurrentList(json.data);
         } catch {} finally { setListLoading(false); }
@@ -43,7 +44,7 @@ export default function DispositionPage() {
         setError(null);
         setData(null);
         try {
-            const res = await fetch(`http://localhost:8000/api/v1/disposition/search/${s}`);
+            const res = await fetch(`${API_V1_BASE}/disposition/search/${s}`);
             const json = await res.json();
             if (json.status === 'success') {
                 setData(json.data);
@@ -65,7 +66,7 @@ export default function DispositionPage() {
         if (!symbol || !manualStart || !manualEnd) return;
         setAddingEvent(true);
         try {
-            const res = await fetch('http://localhost:8000/api/v1/disposition/add-event', {
+            const res = await fetch(`${API_V1_BASE}/disposition/add-event`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ stock_id: symbol, disp_start: manualStart, disp_end: manualEnd }),

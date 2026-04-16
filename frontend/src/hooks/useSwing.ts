@@ -17,11 +17,13 @@
 import { useQuery } from '@tanstack/react-query';
 import axios, { isAxiosError } from 'axios';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 const SWING_SCAN_TIMEOUT_MS = 90_000;
 const SWING_SCAN_MAX_RETRIES = 2;
 
 const api = axios.create({
-    baseURL: 'http://localhost:8000/api/v1',
+    baseURL: API_V1_BASE,
     timeout: SWING_SCAN_TIMEOUT_MS,
 });
 

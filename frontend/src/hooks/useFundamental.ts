@@ -1,8 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 // --- API Services ---
-const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' });
+const api = axios.create({ baseURL: API_V1_BASE });
 
 export const useFundamentalInfo = (stockCode: string, enabled: boolean) => {
     return useQuery({
@@ -36,7 +38,7 @@ export const streamFundamentalReport = async (
     onFinish: () => void
 ) => {
     try {
-        const response = await fetch('http://localhost:8000/api/v1/fundamental/stream-report', {
+        const response = await fetch(`${API_V1_BASE}/fundamental/stream-report`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

@@ -11,13 +11,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from engines.engine_intraday_scanner import (
+from backend.engines.engine_intraday_scanner import (
     get_scan_status,
     get_scan_results,
     get_last_signals_from_db,
-    start_scanner,
     _is_market_hours,
     _run_scan,
     _SCAN_CACHE,
@@ -92,13 +91,14 @@ async def scanner_results(
 
 
 @router.post("/trigger")
-async def trigger_scan(background_tasks: BackgroundTasks) -> Dict[str, str]:
+async def trigger_scan() -> Dict[str, str]:
     """
     手動觸發一次全市場技術面掃描（背景非同步執行）。
 
     - 若已有掃描在執行中，回傳 409 Conflict。
     - 掃描結束後結果寫入記憶體快取與 intraday_signals 表。
     - 以 GET /api/v1/scanner/status 輪詢進度。
+    - _scan_lock 防重入：即使排程與手動觸發同時執行，也不會重複掃描。
     """
     if _SCAN_CACHE.get("status") == "running":
         raise HTTPException(
@@ -106,7 +106,8 @@ async def trigger_scan(background_tasks: BackgroundTasks) -> Dict[str, str]:
             detail="掃描作業進行中，請稍後再試",
         )
 
-    background_tasks.add_task(_run_scan)
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _run_scan)
     return {
         "message": "已觸發盤中全市場掃描，請以 /api/v1/scanner/status 查詢進度",
         "status":  "started",
@@ -116,8 +117,9 @@ async def trigger_scan(background_tasks: BackgroundTasks) -> Dict[str, str]:
 @router.post("/start-scheduler")
 async def restart_scheduler() -> Dict[str, str]:
     """
-    重新啟動排程器（若因例外停止時手動恢復用）。
-    正常情況下排程由 FastAPI startup 自動啟動，此端點僅供緊急修復。
+    重新啟動 APScheduler（若因例外停止時手動恢復用）。
+    正常情況下排程由 FastAPI startup 自動啟動。
     """
-    start_scanner()
-    return {"message": "排程器已（重新）啟動"}
+    from backend.scheduler import start_scheduler as _start_apscheduler
+    _start_apscheduler()
+    return {"message": "APScheduler 排程器已（重新）啟動"}

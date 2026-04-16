@@ -1,20 +1,11 @@
 import sys
-import duckdb
 import os
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
-# 將專案根目錄與 backend 目錄加入 sys.path，解決 ModuleNotFoundError: No module named 'api'
-root_path = Path(__file__).parent.parent.absolute()
-import sys
-import duckdb
-import os
-from pathlib import Path
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-# 將專案根目錄與 backend 目錄加入 sys.path，解決 ModuleNotFoundError: No module named 'api'
+# 將專案根目錄與 backend 目錄加入 sys.path
 root_path = Path(__file__).parent.parent.absolute()
 backend_path = Path(__file__).parent.absolute()
 if str(root_path) not in sys.path:
@@ -25,11 +16,16 @@ if str(backend_path) not in sys.path:
 # 載入專案根目錄 .env（永豐金 API 等）
 from backend import settings  # noqa: F401
 
+# ── 新統一 DB 層 ────────────────────────────────────────────────────────────
+from backend.db.connection import init_all as _init_all_dbs, close_duckdb
+from backend.scheduler import start_scheduler, stop_scheduler
+
 from backend.api.v1 import (
     market_data, sentiment, global_market, fundamental,
-    technical, swing, etfs, floor_bounce, dividend,
+    technical, swing, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
-    heatmap, live_quotes, all_around, intraday_scanner, notifier as notifier_api
+    heatmap, live_quotes, all_around, intraday_scanner, notifier as notifier_api,
+    system as system_api,
 )
 from backend.engines.engine_live_quotes import live_quote_engine
 from backend.engines.engine_all_around import all_around_engine
@@ -71,82 +67,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 初始化 DuckDB 資料庫
+# 初始化資料庫（新統一架構 + 舊相容表）
 @app.on_event("startup")
 async def startup_db_client():
-    data_dir = root_path / 'data'
-    data_dir.mkdir(exist_ok=True)
-    db_path = data_dir / 'market.duckdb'
-    
     print(f"[*] Starting AlphaScan API...")
     print(f"[*] Project Root: {root_path}")
-    print(f"[*] Database Path: {db_path}")
 
-    with duckdb.connect(str(db_path)) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS historical_prices (
-                symbol VARCHAR,
-                date DATE,
-                open DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                close DOUBLE,
-                volume BIGINT,
-                PRIMARY KEY (symbol, date)
-            );
-            CREATE INDEX IF NOT EXISTS idx_symbol_date ON historical_prices (symbol, date DESC);
+    # Step 0: 初始化新統一 DB 層（DuckDB + user.db）
+    _init_all_dbs()
 
-            CREATE TABLE IF NOT EXISTS key_branch_trades (
-                trade_date DATE,
-                stock_id VARCHAR,
-                stock_name VARCHAR,
-                branch_name VARCHAR,
-                side VARCHAR, -- 'B' or 'S'
-                PRIMARY KEY (trade_date, stock_id, branch_name)
-            );
-            CREATE INDEX IF NOT EXISTS idx_key_branch_trades_date_stock
-                ON key_branch_trades (trade_date, stock_id);
-
-            CREATE TABLE IF NOT EXISTS warrant_branch_positions (
-                snapshot_date DATE,
-                stock_id VARCHAR,
-                stock_name VARCHAR,
-                branch_name VARCHAR,
-                position_shares BIGINT,   -- 持有張數
-                est_pnl DOUBLE,           -- 損益推估 (金額，可為負)
-                est_pnl_pct DOUBLE,       -- 損益率 (%), 可為 NULL
-                amount_k DOUBLE,          -- 買超金額 (萬)
-                type VARCHAR,             -- 型態 (認購/認售)
-                PRIMARY KEY (snapshot_date, stock_id, branch_name, type)
-            );
-            CREATE INDEX IF NOT EXISTS idx_warrant_positions_date_stock
-                ON warrant_branch_positions (snapshot_date, stock_id);
-
-            CREATE TABLE IF NOT EXISTS insider_transfers (
-                declare_date DATE,        -- 申報日期
-                stock_id VARCHAR,         -- 股票代號
-                stock_name VARCHAR,       -- 股票名稱 (如有)
-                shares BIGINT,            -- 轉讓張數
-                role VARCHAR,             -- 身分 (董事/大股東等，可為 NULL)
-                method VARCHAR,           -- 轉讓方式 (信託/一般交易等，可為 NULL)
-                note VARCHAR,             -- 備註或原始片段，可為 NULL
-                PRIMARY KEY (declare_date, stock_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_insider_transfers_date_stock
-                ON insider_transfers (declare_date, stock_id);
-
-            CREATE TABLE IF NOT EXISTS stock_sector_map (
-                ticker VARCHAR PRIMARY KEY,
-                name VARCHAR,
-                macro VARCHAR,
-                meso VARCHAR,
-                micro VARCHAR,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-    # ── Step 1: 優先完成 Shioaji 共享 Session 登入（所有引擎共用此連線） ──────
-    # 在 executor 中執行（fetch_contract=True 需要 5~15 秒阻塞，不能在 event loop 中直接跑）
+    # ── Step 1: 優先完成 Shioaji 共享 Session 登入 ────────────────────────────
     import asyncio
     loop = asyncio.get_event_loop()
     try:
@@ -154,16 +84,19 @@ async def startup_db_client():
         if sinopac_session.is_connected:
             print("[Startup] Shioaji 共享 Session 登入成功")
         else:
-            print(f"[Startup] Shioaji 未連線（{sinopac_session.last_error}），各引擎將降級至 yfinance")
+            print(f"[Startup] Shioaji 未連線（{sinopac_session.last_error}），降級至 yfinance")
     except Exception as exc:
         print(f"[Startup] Shioaji 登入例外: {exc}")
 
-    # ── Step 2: 啟動盤中更新排程 ───────────────────────────────────────────────
-    intraday.start_scheduler()
+    # ── Step 2: 啟動統一排程器（取代舊的 intraday.start_scheduler + start_scanner） ──
+    start_scheduler()
 
-    # ── Step 3: 啟動盤中 30 分鐘技術面掃描排程器 ─────────────────────────────
-    from backend.engines.engine_intraday_scanner import start_scanner as start_intraday_scanner
-    start_intraday_scanner()
+    # ── Step 3: 資料完整性檢查 — 如果今日收盤資料不齊，用 yfinance 回補 ─────
+    try:
+        from backend.api.v1.intraday import run_startup_catchup
+        await loop.run_in_executor(None, run_startup_catchup)
+    except Exception as exc:
+        print(f"[StartupCatchup] Failed: {exc}")
 
     # ── Step 4: 啟動即時報價引擎（Shioaji handler 注冊 / yfinance fallback）──
     try:
@@ -184,9 +117,11 @@ async def startup_db_client():
 
 @app.on_event("shutdown")
 async def shutdown_engines():
+    stop_scheduler()
     await live_quote_engine.stop()
     await all_around_engine.stop()
-    sinopac_session.disconnect()  # 最後統一登出共享 Session
+    sinopac_session.disconnect()
+    close_duckdb()
 
 # 註冊 API 路由 (Controllers)
 app.include_router(market_data.router, tags=["Market Data"])
@@ -195,7 +130,6 @@ app.include_router(global_market.router, tags=["Global Market"])
 app.include_router(fundamental.router, tags=["Fundamental Analysis"])
 app.include_router(technical.router, tags=["Technical Analysis"])
 app.include_router(swing.router, tags=["Swing Strategy"])
-app.include_router(etfs.router, tags=["ETF Tracking"])
 app.include_router(floor_bounce.router, tags=["Floor Bounce"])
 app.include_router(dividend.router, tags=["Dividend Analysis"])
 app.include_router(cb_tracker.router, tags=["CB Tracker"])
@@ -210,7 +144,14 @@ app.include_router(live_quotes.router, tags=["Live Quotes"])
 app.include_router(all_around.router, tags=["All-Around Ticker"])
 app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
 app.include_router(notifier_api.router, tags=["Notifications"])
+app.include_router(system_api.router, tags=["System"])
 
 @app.get("/")
-def read_root():
-    return {"status": "AlphaScan API is running."}
+def open_frontend(request: Request):
+    """
+    瀏覽器開啟 http://127.0.0.1:8000 或 http://localhost:8000 時，自動導向 Vite 前端 (:1420)。
+    REST/WebSocket 仍為 /api、/ws；文件見 /docs。
+    """
+    host = request.headers.get("host", "127.0.0.1:8000")
+    hostname = host.split(":")[0]
+    return RedirectResponse(url=f"http://{hostname}:1420/", status_code=302)

@@ -1,12 +1,10 @@
-import sqlite3
 import pandas as pd
-from pathlib import Path
 from fastapi import APIRouter
+from backend.db import queries as _db_queries
+from backend.db.symbol_utils import strip_suffix
 
 router = APIRouter()
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
-DB_PATH = PROJECT_ROOT / "databases" / "db_technical_prices.db"
 
 @router.get("/api/v1/backtest/history")
 async def get_simple_backtest(stock_id: str, strategy: str = "core_long"):
@@ -14,18 +12,13 @@ async def get_simple_backtest(stock_id: str, strategy: str = "core_long"):
     提供個股過去一年，特定策略的歷史勝率與報酬率回報
     目前支援: core_long (猛虎出閘)
     """
-    if not DB_PATH.exists():
+    sid = strip_suffix(stock_id)
+    df = _db_queries.get_price_df(sid, period="2y")
+    if df.empty:
         return {"error": "Database not found"}
-        
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        # 抓取過去一年的資料 (包含計算所需的預查長條圖)
-        df = pd.read_sql(
-            "SELECT date, open, high, low, close, volume FROM daily_price WHERE stock_id = ? ORDER BY date ASC",
-            conn, params=(stock_id,)
-        )
-    finally:
-        conn.close()
+
+    df = df.rename(columns={"date": "date", "open": "open", "high": "high",
+                              "low": "low", "close": "close", "volume": "volume"})
 
     if len(df) < 60:
         return {"error": "Not enough data"}

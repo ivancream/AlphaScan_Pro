@@ -10,11 +10,15 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
-  // Tauri 開發伺服器預設埠 1420
+  // Tauri 開發伺服器預設埠 1420；/api、/ws 轉到 FastAPI :8000，前端可用同源網址
   server: {
     port: 1420,
     strictPort: true,
     host: "localhost",
+    proxy: {
+      "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/ws": { target: "ws://127.0.0.1:8000", ws: true },
+    },
   },
   // Tauri 要求使用相對路徑
   base: "./",

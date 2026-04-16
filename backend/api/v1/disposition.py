@@ -29,30 +29,30 @@ async def get_current_disposition():
     try:
         items = fetch_current_dispositions_and_save()
         
-        # 批量獲取價格資料庫最新行情提高效能
-        import pandas as pd
-        import sqlite3
-        from pathlib import Path
-        
-        root = Path(__file__).parent.parent.parent.parent.absolute()
-        db_path = root / "databases" / "db_technical_prices.db"
-        
+        # 批量獲取最新行情（從 DuckDB daily_prices 表）
         codes = [it.get("stock_id", "") for it in items if it.get("stock_id")]
         price_map = {}
         
-        if codes and db_path.exists():
+        if codes:
             try:
-                with sqlite3.connect(str(db_path)) as conn:
-                    marks = ",".join(["?"] * len(codes))
-                    query = f"""
-                        SELECT stock_id, close, volume 
-                        FROM daily_price 
-                        WHERE stock_id IN ({marks})
-                        AND date = (SELECT MAX(date) FROM daily_price)
-                    """
-                    df_p = pd.read_sql(query, conn, params=codes)
-                    for _, row in df_p.iterrows():
-                        price_map[row['stock_id']] = {'close': row['close'], 'volume': row['volume']}
+                from backend.db.connection import duck_read
+                with duck_read() as conn:
+                    marks = ",".join(["?" for _ in codes])
+                    rows = conn.execute(
+                        f"""
+                        SELECT dp.stock_id, dp.close, dp.volume
+                        FROM daily_prices dp
+                        INNER JOIN (
+                            SELECT stock_id, MAX(date) AS max_date
+                            FROM daily_prices
+                            WHERE stock_id IN ({marks})
+                            GROUP BY stock_id
+                        ) latest ON dp.stock_id = latest.stock_id AND dp.date = latest.max_date
+                        """,
+                        codes,
+                    ).fetchall()
+                for sid, close, volume in rows:
+                    price_map[sid] = {"close": close, "volume": volume}
             except Exception as e:
                 print(f"[API] Error fetching prices for disposition list: {e}")
 

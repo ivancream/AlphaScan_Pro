@@ -2,8 +2,6 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import pandas as pd
-import duckdb
-import sqlite3
 import os
 import datetime
 
@@ -11,22 +9,44 @@ from backend.engines.cache_store import StaticCache, TTL_12H
 
 _CACHE_CONTROL = f"public, max-age={TTL_12H}, stale-while-revalidate=600"
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from core.cb_crawler import (
+from backend.engines.cb_crawler import (
     CBDB, update_cb_info, update_cb_daily, update_stock_fundamentals,
     get_cb_with_latest_price, get_cb_history,
     calc_arbitrage, calc_premium, calc_ytp
 )
-from core.market_db import MarketDB
+from backend.db import queries as _db_queries
+from backend.db.connection import duck_read
 
 router = APIRouter()
+
+
+class _MarketDBCompat:
+    """Lightweight shim replacing the deleted core.market_db.MarketDB."""
+
+    @property
+    def conn(self):
+        raise AttributeError(
+            "_MarketDBCompat has no .conn — use duck_read() directly"
+        )
+
+    def get_stock_data(self, stock_id: str, period: str = "1y") -> pd.DataFrame:
+        df = _db_queries.get_price_df(str(stock_id).strip(), period)
+        if df.empty:
+            return df
+        df = df.rename(columns={"date": "Date"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date")
+        return df
+
+    def get_stock_name(self, stock_id: str) -> str:
+        return _db_queries.get_stock_name(str(stock_id).strip())
+
 
 def get_cbdb():
     return CBDB()
 
 def get_mdb():
-    return MarketDB()
+    return _MarketDBCompat()
 
 def _days_to_maturity(maturity_date_str: Optional[str]) -> Optional[int]:
     if not maturity_date_str:
@@ -37,7 +57,7 @@ def _days_to_maturity(maturity_date_str: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
-def _enrich_df(df: pd.DataFrame, mdb: MarketDB) -> pd.DataFrame:
+def _enrich_df(df: pd.DataFrame, mdb: _MarketDBCompat) -> pd.DataFrame:
     if df.empty:
         return df
 
@@ -74,14 +94,15 @@ def _enrich_df(df: pd.DataFrame, mdb: MarketDB) -> pd.DataFrame:
     df["secured_label"] = df["is_secured"].map({0: "無", 1: "有"})
     
     try:
-        tdcc_df = pd.read_sql("""
-            SELECT stock_id, large_holders_pct, total_holders 
-            FROM stock_tdcc 
-            WHERE date = (SELECT MAX(date) FROM stock_tdcc)
-        """, mdb.conn)
+        with duck_read() as conn:
+            tdcc_df = conn.execute("""
+                SELECT stock_id, whale_1000_pct AS large_holders_pct, total_holders
+                FROM tdcc_distribution
+                WHERE date = (SELECT MAX(date) FROM tdcc_distribution)
+            """).df()
         tdcc_large = tdcc_df.set_index("stock_id")["large_holders_pct"].to_dict()
         tdcc_total = tdcc_df.set_index("stock_id")["total_holders"].to_dict()
-    except:
+    except Exception:
         tdcc_large = {}
         tdcc_total = {}
         

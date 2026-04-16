@@ -5,6 +5,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { useNavigate } from 'react-router-dom';
 import { createChart, ColorType, IChartApi, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import { LineChart, Play, Activity } from 'lucide-react';
+import { API_V1_BASE } from '@/lib/apiBase';
 
 export default function FloorBouncePage() {
     const [showMode, setShowMode] = useState('signals'); // all, ceiling, floor, signals
@@ -273,7 +274,7 @@ export default function FloorBouncePage() {
                                     const val = stockInput.trim().toUpperCase();
                                     if (!val) return;
                                     try {
-                                        const res = await fetch(`http://localhost:8000/api/v1/market-data/resolve/${val}`);
+                                        const res = await fetch(`${API_V1_BASE}/market-data/resolve/${val}`);
                                         const data = await res.json();
                                         setStockInput(data.symbol);
                                         setStockToChart(data.symbol);
@@ -289,7 +290,7 @@ export default function FloorBouncePage() {
                                 const val = stockInput.trim().toUpperCase();
                                 if (!val) return;
                                 try {
-                                    const res = await fetch(`http://localhost:8000/api/v1/market-data/resolve/${val}`);
+                                    const res = await fetch(`${API_V1_BASE}/market-data/resolve/${val}`);
                                     const data = await res.json();
                                     setStockInput(data.symbol);
                                     setStockToChart(data.symbol);

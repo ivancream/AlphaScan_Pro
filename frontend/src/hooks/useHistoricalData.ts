@@ -2,8 +2,10 @@ import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { MarketData } from '../types';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 const fetchMarketData = async (symbol: string, limit: number): Promise<MarketData> => {
-    const { data } = await axios.get(`http://localhost:8000/api/v1/market-data/${symbol}?limit=${limit}`);
+    const { data } = await axios.get(`${API_V1_BASE}/market-data/${symbol}?limit=${limit}`);
     return data;
 };
 

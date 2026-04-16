@@ -1,8 +1,10 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import axios from 'axios';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 // --- API Services ---
-const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' });
+const api = axios.create({ baseURL: API_V1_BASE });
 
 export const useMacroData = () => {
     return useQuery({
@@ -46,7 +48,7 @@ export const streamAIReport = async (
     onFinish: () => void
 ) => {
     try {
-        const response = await fetch('http://localhost:8000/api/v1/global/stream-report', {
+        const response = await fetch(`${API_V1_BASE}/global/stream-report`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ market_name: marketName })

@@ -38,23 +38,6 @@ const PERIOD_LABELS: Record<ChartPeriod, string> = { daily: '日K' };
 
 // ─── Shared UI atoms ──────────────────────────────────────────────────────────
 
-function StatBadge({
-  label,
-  value,
-  accent = 'text-white',
-}: {
-  label: string;
-  value: React.ReactNode;
-  accent?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-gray-800 bg-[#0B0E11] px-4 py-3">
-      <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">{label}</div>
-      <div className={`mt-1 text-base font-black font-mono ${accent}`}>{value}</div>
-    </div>
-  );
-}
-
 function ErrorBlock({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="m-6 rounded-xl border border-orange-900/50 bg-orange-950/20 p-5 flex items-start gap-4">
@@ -133,18 +116,6 @@ export default function StockDetailPage() {
   const displayVwap   = snapshot?.vwap;
   const isUp          = Number(displayChange) >= 0;
 
-  const badges = useMemo(
-    () => [
-      { label: '布林狀態', value: summary?.BB_Status ?? '—' },
-      { label: 'VWAP',     value: displayVwap ? Number(displayVwap).toFixed(2) : '—', accent: 'text-cyan-400' },
-      { label: 'RSI (14)', value: summary?.RSI ?? '—' },
-      { label: 'MACD 柱',  value: summary?.MACD_Hist ?? '—' },
-      { label: 'RS',       value: summary?.RS ?? '—' },
-      { label: 'MA20',     value: summary?.MA20 ?? '—' },
-    ],
-    [summary, displayVwap],
-  );
-
   const referencePrice = useMemo(() => {
     const rows = marketData?.data;
     return rows?.length ? rows[rows.length - 1]?.close : undefined;
@@ -195,14 +166,6 @@ export default function StockDetailPage() {
             </div>
           </div>
 
-          {/* 技術指標 badge 列 */}
-          {!(technicalLoading || marketLoading) && (
-            <div className="flex-1 min-w-0 grid grid-cols-3 lg:grid-cols-6 gap-2">
-              {badges.map((b) => (
-                <StatBadge key={b.label} label={b.label} value={b.value} accent={b.accent} />
-              ))}
-            </div>
-          )}
         </div>
       </div>
 

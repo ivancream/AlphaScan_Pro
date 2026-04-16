@@ -23,7 +23,8 @@ import time
 import os
 import re
 
-BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 專案根目錄（backend/engines/ → 往上三層）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CB_DB_PATH = os.path.join(BASE_DIR, "data", "cb.db")
 
 HEADERS = {

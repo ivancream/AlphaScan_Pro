@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { GitMerge, ArrowLeftRight, TrendingUp, TrendingDown } from 'lucide-react';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 // ── 型別定義 ──────────────────────────────────────────────
 interface CorrelationResult {
   rank: number;
@@ -41,8 +43,6 @@ interface SpreadResponse {
   ratio_mean_recent: number;
   series: SpreadPoint[];
 }
-
-const API_BASE = 'http://localhost:8000';
 
 // 相關係數的顏色判斷
 function corrColor(corr: number): string {
@@ -229,7 +229,7 @@ export default function CorrelationPage() {
     setData(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/v1/correlation/${sid}?top_n=10`);
+      const res = await fetch(`${API_V1_BASE}/correlation/${sid}?top_n=10`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ detail: '請求失敗' }));
         throw new Error(errData.detail || `HTTP ${res.status}`);
@@ -263,7 +263,7 @@ export default function CorrelationPage() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/v1/correlation/spread?stock_a=${a}&stock_b=${b}&days=${spreadDays}&recent_days=${recentDays}`
+        `${API_V1_BASE}/correlation/spread?stock_a=${a}&stock_b=${b}&days=${spreadDays}&recent_days=${recentDays}`
       );
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ detail: '請求失敗' }));

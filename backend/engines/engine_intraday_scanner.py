@@ -5,16 +5,20 @@
 ─────────────────────────────────────────────────────────────
 Layer-1  歷史層：db_technical_prices.db / daily_price 表
          提供截至昨日的穩定日 K 資料。
+         掃描時一次性批次讀取全市場歷史 K 線（單一 SQL 查詢）。
 
 Layer-2  即時層：永豐 Shioaji snapshots API（批次一次取全市場）
          補入今日盤中最新 OHLCV，再丟給 BollingerStrategy 計算。
 
-掃描流程：
-  1. 從 DB 讀取全市場股票清單
-  2. 一次性批次呼叫 fetch_sinopac_ohlcv_map() 取得所有快照
-  3. 逐股合併歷史 K + 今日快照 → 執行三種策略分析
-  4. 符合條件者寫入記憶體快取 _SCAN_CACHE
-  5. 同步將本次掃描結果寫入 intraday_signals 表（可供重啟後查詢）
+掃描流程（效能優化版）：
+  1. 從 DB 讀取全市場股票清單（向量化過濾）
+  2. 一次性批次呼叫 get_ohlcv_map() 取得所有快照
+  3. 一次性批次讀取所有歷史 K 線（_load_all_history）
+  4. 以 ProcessPoolExecutor 平行計算：
+     - 每股只呼叫一次 calculate_indicators()
+     - 同一組指標共用三種策略判斷
+  5. 符合條件者寫入記憶體快取 _SCAN_CACHE
+  6. 同步將本次掃描結果寫入 intraday_signals 表
 
 前端 API 只需讀取 _SCAN_CACHE，不需在 Request 時當場計算。
 """
@@ -24,10 +28,11 @@ import asyncio
 import datetime
 import json
 import os
-import sqlite3
+import threading
 import time
 import uuid
 import zoneinfo
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -35,8 +40,11 @@ import pandas as pd
 
 from .sinopac_session import sinopac_session
 from .engine_technical import BollingerStrategy
+from .disposition_overlay import compute_event_disposition_map, enrich_scan_rows_disposition
+from backend.db import queries as _db_queries
+from backend.db.user_db import write_signals, get_latest_signals
 
-# notifier 使用 lazy import，避免啟動時循環依賴
+# notifier lazy import
 _notifier = None
 
 def _get_notifier():
@@ -46,9 +54,6 @@ def _get_notifier():
         _notifier = _n
     return _notifier
 
-# ── 路徑常數 ────────────────────────────────────────────────────────────────
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
-_DB_PATH = _PROJECT_ROOT / "databases" / "db_technical_prices.db"
 _TZ = zoneinfo.ZoneInfo("Asia/Taipei")
 
 # ── 記憶體快取（進程共享，重啟後清空） ────────────────────────────────────
@@ -64,6 +69,7 @@ _SCAN_CACHE: Dict = {
 }
 
 _scanner_task: Optional[asyncio.Task] = None
+_scan_lock = threading.Lock()
 
 # ── 輔助函式 ─────────────────────────────────────────────────────────────────
 
@@ -90,42 +96,84 @@ def _is_eligible(sid: str, sname: str) -> bool:
     return True
 
 
-def _ensure_signals_table(conn: sqlite3.Connection) -> None:
-    """建立 intraday_signals 表（若不存在）。"""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS intraday_signals (
-            scan_id     TEXT    NOT NULL,
-            scan_time   TEXT    NOT NULL,
-            strategy    TEXT    NOT NULL,
-            stock_id    TEXT    NOT NULL,
-            name        TEXT,
-            market_type TEXT,
-            close       REAL,
-            change_pct  REAL,
-            volume_k    INTEGER,
-            signal_json TEXT,
-            PRIMARY KEY (scan_time, strategy, stock_id)
-        )
-    """)
-    # 保留最近 5 次掃描，避免無限成長
-    conn.execute("""
-        DELETE FROM intraday_signals
-        WHERE scan_id NOT IN (
-            SELECT DISTINCT scan_id FROM intraday_signals
-            ORDER BY scan_time DESC
-            LIMIT 5
-        )
-    """)
-    conn.commit()
+def _filter_eligible(stock_info: pd.DataFrame) -> pd.DataFrame:
+    """向量化版本的股票過濾，取代逐列 DataFrame.apply()。"""
+    sid = stock_info["stock_id"]
+    name = stock_info["name"].fillna("")
+
+    has_alpha = sid.str.contains(r"[a-zA-Z]", regex=True)
+    is_valid_a_share = (
+        (sid.str.len() == 6) & sid.str.endswith("A") & sid.str[:-1].str.isdigit()
+    )
+    alpha_ok = ~has_alpha | is_valid_a_share
+
+    name_ok = ~(
+        name.str.contains("正2", regex=False)
+        | name.str.contains("反1", regex=False)
+        | name.str.contains("-DR", regex=False)
+    )
+    return stock_info[alpha_ok & name_ok].reset_index(drop=True)
+
+
+def _load_twstock_codes() -> dict:
+    """載入 twstock 產業分類（每次掃描只做一次）。"""
+    try:
+        import twstock
+        return twstock.codes
+    except Exception:
+        return {}
+
+
+def _load_all_history() -> Dict[str, pd.DataFrame]:
+    """
+    一次性批次讀取所有股票近 500 天的歷史 K 線（DuckDB 版）。
+    回傳 {stock_id: DataFrame}，每個 DataFrame 含
+    Date, Open, High, Low, Close, Volume, Disposition_Mins。
+    """
+    all_df = _db_queries.get_price_df_all(cutoff_days=500)
+    if all_df.empty:
+        return {}
+
+    # Rename columns to match BollingerStrategy expectations
+    all_df = all_df.rename(columns={
+        "date": "Date", "open": "Open", "high": "High",
+        "low": "Low", "close": "Close", "volume": "Volume",
+        "disposition_mins": "Disposition_Mins",
+    })
+    all_df["Date"] = pd.to_datetime(all_df["Date"])
+
+    return {
+        sid: grp.drop(columns=["stock_id"]).reset_index(drop=True)
+        for sid, grp in all_df.groupby("stock_id")
+    }
+
+
+def _write_signals_to_db_new(
+    scan_id: str,
+    scan_time: str,
+    results: Dict[str, List[Dict]],
+) -> None:
+    """將掃描結果寫入 user.db intraday_signals 表。"""
+    write_signals(scan_id, scan_time, results)
 
 
 def _write_signals_to_db(
     scan_id: str,
     scan_time: str,
     results: Dict[str, List[Dict]],
-    conn: sqlite3.Connection,
+    conn=None,  # kept for backward compat but ignored
 ) -> None:
-    """將掃描結果批次寫入 intraday_signals 表。"""
+    """將掃描結果批次寫入 intraday_signals 表。(wrapper)"""
+    _write_signals_to_db_new(scan_id, scan_time, results)
+
+
+# ── Keep old signature for any existing callers ────────────────────────────
+def _write_signals_rows_compat(
+    scan_id: str,
+    scan_time: str,
+    results: Dict[str, List[Dict]],
+    conn=None,
+) -> None:
     rows = []
     for strategy, items in results.items():
         for item in items:
@@ -156,93 +204,190 @@ def _write_signals_to_db(
         conn.commit()
 
 
-def _build_df(
-    conn: sqlite3.Connection,
-    stock_id: str,
-    ohlcv_map: Dict[str, Dict],
-    with_disposition: bool = True,
-) -> Optional[pd.DataFrame]:
-    """
-    從 DB 讀取歷史 K 線，並 append 今日盤中快照（若存在且尚未入庫）。
-    回傳欄位：Date, Open, High, Low, Close, Volume[, Disposition_Mins]
-    """
-    select_cols = (
-        "date, open, high, low, close, volume, IFNULL(disposition_mins,0) as disposition_mins"
-        if with_disposition
-        else "date, open, high, low, close, volume"
-    )
-    df = pd.read_sql(
-        f"SELECT {select_cols} FROM daily_price WHERE stock_id=? ORDER BY date ASC",
-        conn,
-        params=[stock_id],
-    )
-    if df.empty:
-        return None
+# ── Per-stock worker (top-level function for ProcessPoolExecutor pickling) ──
 
-    col_names = (
-        ["Date", "Open", "High", "Low", "Close", "Volume", "Disposition_Mins"]
-        if with_disposition
-        else ["Date", "Open", "High", "Low", "Close", "Volume"]
-    )
-    df.columns = col_names
-    df["Date"] = pd.to_datetime(df["Date"])
+def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
+    """
+    ProcessPoolExecutor worker：對單一股票執行指標計算 + 三策略判斷。
+    指標只計算一次，三策略共用，避免 3x 重複運算。
+    必須是 module-level function 才能被 pickle 序列化到子進程。
+    """
+    stock_id = payload["stock_id"]
+    df = payload["df"]
+    snap = payload["snap"]
+    name = payload["name"]
+    market = payload["market"]
+    industry = payload["industry"]
+    max_date_limit = payload["max_date_limit"]
+    event_disp_mins = int(payload.get("event_disp_mins") or 0)
 
     # 注入今日盤中快照
-    snap = ohlcv_map.get(stock_id)
+    # 若尚未寫入今日處置資料，沿用最後一筆已知處置分鐘數，避免把處置狀態覆蓋成 0。
+    last_disp_mins = int(df.iloc[-1].get("Disposition_Mins", 0) or 0)
     today_ts = pd.Timestamp(datetime.date.today())
     if snap and snap.get("Close", 0) > 0 and today_ts not in df["Date"].values:
-        today_row: Dict = {
-            "Date":  today_ts,
-            "Open":  snap["Open"],
-            "High":  snap["High"],
-            "Low":   snap["Low"],
+        today_row = pd.DataFrame([{
+            "Date": today_ts,
+            "Open": snap["Open"],
+            "High": snap["High"],
+            "Low": snap["Low"],
             "Close": snap["Close"],
             "Volume": snap["Volume"],
-        }
-        if with_disposition:
-            today_row["Disposition_Mins"] = 0
-        df = pd.concat([df, pd.DataFrame([today_row])], ignore_index=True)
+            "Disposition_Mins": last_disp_mins,
+        }])
+        df = pd.concat([df, today_row], ignore_index=True)
 
-    return df
+    if len(df) < 60:
+        return None
+
+    # 過濾過時資料
+    if max_date_limit is not None:
+        last_date = df["Date"].iloc[-1]
+        if pd.Timestamp(last_date) < max_date_limit:
+            return None
+
+    # 計算指標 — 只做一次，三策略共用
+    df = BollingerStrategy.calculate_indicators(df)
+    if df is None:
+        return None
+
+    # 共用欄位
+    suffix = ".TWO" if market in ("OTC", "上櫃") else ".TW"
+    real_ticker = f"{stock_id}{suffix}"
+
+    change_pct = round(snap.get("ChangeRate", 0), 2) if snap else 0
+    if change_pct == 0 and len(df) >= 2:
+        today_c = df.iloc[-1]["Close"]
+        prev_c = df.iloc[-2]["Close"]
+        if prev_c > 0:
+            raw_pct = (today_c - prev_c) / prev_c * 100
+            change_pct = round(max(-10.0, min(10.0, raw_pct)), 2)
+
+    volume_k = int(df.iloc[-1]["Volume"] / 1000)
+    close = round(float(df.iloc[-1]["Close"]), 2)
+    amount_b = round((close * df.iloc[-1]["Volume"]) / 1e8, 2)
+    last_date_val = df.iloc[-1]["Date"]
+    data_date = (
+        last_date_val.strftime("%Y-%m-%d")
+        if hasattr(last_date_val, "strftime")
+        else str(last_date_val)[:10]
+    )
+
+    base_row = {
+        "代號":         stock_id,
+        "名稱":         name,
+        "產業":         industry,
+        "收盤價":       close,
+        "今日漲跌幅(%)": change_pct,
+        "成交量(張)":   volume_k,
+        "成交額(億)":   amount_b,
+        "資料日期":     data_date,
+        "market_type":  market,
+        "_ticker":      real_ticker,
+        "_name":        name,
+    }
+
+    result: Dict = {"stock_id": stock_id, "long": None, "short": None, "wanderer": None}
+
+    # ── 多方策略 ──────────────────────────────────────────────────────────
+    if len(df) >= 60:
+        try:
+            _, q_long, _ = BollingerStrategy.analyze_from_computed(df)
+            if q_long.get("Details", {}).get("cond_a"):
+                result["long"] = {
+                    **base_row,
+                    "均線多排":     "V" if q_long["Details"]["cond_d"] else "-",
+                    "爆量表態":     "V" if q_long["Details"]["cond_c"] else "-",
+                    "月線斜率":     q_long.get("MA20_Slope_Pct", 0),
+                    "上軌斜率":     q_long.get("Upper_Slope_Pct", 0),
+                    "帶寬增長(%)":  q_long.get("Bandwidth_Chg", 0),
+                    "量比":         q_long.get("Vol_Ratio", 0),
+                    "上軌乖離(%)":  q_long.get("Pos_Upper", 0),
+                    "_q_data":      q_long,
+                }
+        except Exception:
+            pass
+
+    # ── 空方策略 ──────────────────────────────────────────────────────────
+    if len(df) >= 120:
+        try:
+            _, q_short, _ = BollingerStrategy.analyze_short_from_computed(df)
+            det = q_short.get("Details", {})
+            if det.get("cond_trend_bearish") and det.get("cond_ma20_slope_down"):
+                result["short"] = {
+                    **base_row,
+                    "空頭排列":      "V" if det["cond_trend_bearish"] else "-",
+                    "月線下彎":      "V" if det["cond_ma20_slope_down"] else "-",
+                    "沿下軌":        "V" if det.get("cond_near_lower_band") else "-",
+                    "月線斜率":      q_short.get("MA20_Slope", 0),
+                    "布林位置":      q_short.get("BB_Position_Ratio"),
+                    "季線乖離":      q_short.get("MA60_Bias", 0),
+                    "半年線乖離":    q_short.get("MA120_Bias", 0),
+                    "_q_data":       q_short,
+                }
+        except Exception:
+            pass
+
+    # ── 浪子回頭策略 ──────────────────────────────────────────────────────
+    if len(df) >= 60:
+        try:
+            _, q_wand, _ = BollingerStrategy.analyze_wanderer_from_computed(df)
+            det = q_wand.get("Details", {})
+            if det.get("cond_slope") and det.get("cond_bb_level"):
+                from_db = int(df.iloc[-1].get("Disposition_Mins", 0) or 0)
+                disp_val = event_disp_mins if event_disp_mins > 0 else from_db
+                result["wanderer"] = {
+                    **base_row,
+                    "月線斜率(%)":  round(q_wand.get("MA20_Slope_Pct", 0), 4),
+                    "布林位階":      round(q_wand.get("BB_Position", 0), 2),
+                    "布林上軌":      round(q_wand.get("BB_Upper", 0), 2),
+                    "布林中軌":      round(q_wand.get("BB_Middle", 0), 2),
+                    "布林下軌":      round(q_wand.get("BB_Lower", 0), 2),
+                    "處置狀態":      f"每 {int(disp_val)} 分鐘撮合" if disp_val > 0 else "-",
+                    "is_disposition": bool(disp_val > 0),
+                    "_q_data":       q_wand,
+                }
+        except Exception:
+            pass
+
+    if result["long"] is None and result["short"] is None and result["wanderer"] is None:
+        return None
+    return result
 
 
 # ── 核心掃描函式（同步，在 executor 中執行） ─────────────────────────────────
 
 def _run_scan() -> None:
     """
-    全市場技術面掃描主函式。
-    執行三種策略：多方布林 / 空方布林 / 浪子回頭。
-    結果寫入記憶體快取 _SCAN_CACHE 及 intraday_signals 表。
+    全市場技術面掃描主函式（效能優化版）。
+    - 批次 DB 讀取（單一 SQL 查詢取代 N+1 逐股 Query）
+    - 指標只計算一次，三策略共用（消除 3x 重複 calculate_indicators）
+    - ProcessPoolExecutor 多核平行計算
+    - threading.Lock 防重入（排程 + 手動觸發不會重複執行）
     """
     global _SCAN_CACHE
 
-    scan_id   = str(uuid.uuid4())[:8]
-    scan_time = datetime.datetime.now(_TZ).isoformat()
-    start_t   = time.time()
+    if not _scan_lock.acquire(blocking=False):
+        print("[Scanner] 掃描已在執行中，跳過本次觸發")
+        return
 
-    _SCAN_CACHE.update({
-        "status":  "running",
-        "message": "初始化掃描...",
-        "scan_id": scan_id,
-    })
-    print(f"[Scanner #{scan_id}] 啟動掃描 at {scan_time}")
+    scan_id = str(uuid.uuid4())[:8]
 
     try:
-        if not _DB_PATH.exists():
-            raise FileNotFoundError(f"找不到資料庫: {_DB_PATH}")
+        scan_time = datetime.datetime.now(_TZ).isoformat()
+        start_t   = time.time()
 
-        conn = sqlite3.connect(str(_DB_PATH))
-        _ensure_signals_table(conn)
+        _SCAN_CACHE.update({
+            "status":  "running",
+            "message": "初始化掃描...",
+            "scan_id": scan_id,
+        })
+        print(f"[Scanner #{scan_id}] 啟動掃描 at {scan_time}")
 
-        # ── 1. 讀取股票清單 ─────────────────────────────────────────────────
-        stock_info = pd.read_sql(
-            "SELECT stock_id, name, market_type FROM stock_info", conn
-        )
-        stock_info = stock_info[
-            stock_info.apply(
-                lambda r: _is_eligible(r["stock_id"], r["name"] or ""), axis=1
-            )
-        ]
+        # ── 1. 讀取股票清單 + 向量化過濾 ─────────────────────────────────────
+        stock_info_raw = _db_queries.get_stock_info_df()
+        stock_info = stock_info_raw.rename(columns={"market": "market_type"}) if not stock_info_raw.empty else pd.DataFrame()
+        stock_info = _filter_eligible(stock_info)
         all_ids = stock_info["stock_id"].tolist()
         total   = len(all_ids)
         _SCAN_CACHE["message"] = f"正在批次取得 {total} 檔快照..."
@@ -252,148 +397,91 @@ def _run_scan() -> None:
         ohlcv_map = sinopac_session.get_ohlcv_map(all_ids)
         snap_count = len(ohlcv_map)
         print(f"[Scanner #{scan_id}] Sinopac 回傳 {snap_count} 檔快照")
-        _SCAN_CACHE["message"] = f"快照取得 {snap_count} 檔，開始策略計算..."
+        _SCAN_CACHE["message"] = f"快照 {snap_count} 檔，正在批次讀取歷史 K 線..."
 
-        # ── 3. 取全局最新日期，過濾過時股票 ─────────────────────────────────
-        max_date_row = pd.read_sql(
-            "SELECT MAX(date) FROM daily_price", conn
-        ).iloc[0, 0]
+        # ── 3. 一次性批次讀取所有歷史 K 線（DuckDB） ────────────────────────
+        t_db = time.time()
+        history_cache = _load_all_history()
+        db_elapsed = time.time() - t_db
+        print(f"[Scanner #{scan_id}] 批次讀取 {len(history_cache)} 檔歷史K線 ({db_elapsed:.1f}s)")
+
+        disp_event_by_sid = compute_event_disposition_map(history_cache)
+
+        # ── 4. 取全局最新日期，過濾過時股票 ─────────────────────────────────
+        max_date_str = _db_queries.get_latest_price_date()
         max_date_limit = (
-            pd.to_datetime(max_date_row) - pd.Timedelta(days=5)
-            if max_date_row else None
+            pd.to_datetime(max_date_str) - pd.Timedelta(days=5)
+            if max_date_str else None
         )
 
-        # ── 4. 嘗試引入 twstock 做產業分類 ───────────────────────────────────
-        try:
-            import twstock
-            tw_codes = twstock.codes
-        except Exception:
-            tw_codes = {}
+        # ── 5. twstock 產業分類（只載入一次） ────────────────────────────────
+        tw_codes = _load_twstock_codes()
 
+        # ── 6. 組裝 worker 工作清單 ──────────────────────────────────────────
+        _SCAN_CACHE["message"] = f"開始策略計算（{total} 檔）..."
+        work_items: List[Dict] = []
+        for _, row in stock_info.iterrows():
+            sid = row["stock_id"]
+            df = history_cache.get(sid)
+            if df is None or len(df) < 60:
+                continue
+
+            industry = "其他"
+            try:
+                code_obj = tw_codes.get(sid)
+                if code_obj:
+                    industry = getattr(code_obj, "group", "其他")
+            except Exception:
+                pass
+
+            work_items.append({
+                "stock_id": sid,
+                "df": df,
+                "snap": ohlcv_map.get(sid),
+                "name": row["name"] or "",
+                "market": row.get("market_type", ""),
+                "industry": industry,
+                "max_date_limit": max_date_limit,
+                "event_disp_mins": disp_event_by_sid.get(sid, 0),
+            })
+
+        # ── 7. ProcessPoolExecutor 多核平行策略計算 ──────────────────────────
+        t_calc = time.time()
         results_long     : List[Dict] = []
         results_short    : List[Dict] = []
         results_wanderer : List[Dict] = []
 
-        for _, row in stock_info.iterrows():
-            stock_id = row["stock_id"]
-            name     = row["name"] or ""
-            market   = row.get("market_type", "")
-
-            # 讀取歷史 + 注入快照
-            df = _build_df(conn, stock_id, ohlcv_map, with_disposition=True)
-            if df is None or len(df) < 60:
-                continue
-
-            if max_date_limit is not None:
-                last_date = df["Date"].iloc[-1] if "Date" in df.columns else None
-                if last_date is not None and pd.Timestamp(last_date) < max_date_limit:
-                    continue
-
-            suffix      = ".TW" if market == "上市" else ".TWO"
-            real_ticker = f"{stock_id}{suffix}"
-
-            snap        = ohlcv_map.get(stock_id, {})
-            change_pct  = round(snap.get("ChangeRate", 0), 2)
-            if change_pct == 0 and len(df) >= 2:
-                today_c = df.iloc[-1]["Close"]
-                prev_c  = df.iloc[-2]["Close"]
-                change_pct = round((today_c - prev_c) / prev_c * 100, 2) if prev_c > 0 else 0
-
-            volume_k = int(df.iloc[-1]["Volume"] / 1000)
-            close    = round(df.iloc[-1]["Close"], 2)
-            amount_b = round((close * df.iloc[-1]["Volume"]) / 1e8, 2)
-
-            try:
-                industry = (
-                    getattr(tw_codes.get(stock_id), "group", "其他")
-                    if tw_codes.get(stock_id) else "其他"
+        try:
+            cpu_count = min(os.cpu_count() or 4, 8)
+            chunksize = max(1, len(work_items) // (cpu_count * 4))
+            with ProcessPoolExecutor(max_workers=cpu_count) as pool:
+                all_results = list(
+                    pool.map(_analyze_single_stock, work_items, chunksize=chunksize)
                 )
-            except Exception:
-                industry = "其他"
+        except Exception as mp_exc:
+            print(f"[Scanner #{scan_id}] ProcessPool 失敗 ({mp_exc})，改用單執行緒")
+            all_results = [_analyze_single_stock(item) for item in work_items]
 
-            base_row = {
-                "代號":         stock_id,
-                "名稱":         name,
-                "產業":         industry,
-                "收盤價":       close,
-                "今日漲跌幅(%)": change_pct,
-                "成交量(張)":   volume_k,
-                "成交額(億)":   amount_b,
-                "資料日期":     df.iloc[-1]["Date"].strftime("%Y-%m-%d") if hasattr(df.iloc[-1]["Date"], "strftime") else str(df.iloc[-1]["Date"])[:10],
-                "market_type":  market,
-                "_ticker":      real_ticker,
-                "_name":        name,
-            }
+        for r in all_results:
+            if r is None:
+                continue
+            if r.get("long"):
+                results_long.append(r["long"])
+            if r.get("short"):
+                results_short.append(r["short"])
+            if r.get("wanderer"):
+                results_wanderer.append(r["wanderer"])
 
-            # ── 多方策略 ────────────────────────────────────────────────────
-            if len(df) >= 60:
-                try:
-                    _, q_long, _ = BollingerStrategy.analyze(df)
-                    if q_long.get("Details", {}).get("cond_a"):  # 核心：通道擴張
-                        results_long.append({
-                            **base_row,
-                            "均線多排":     "V" if q_long["Details"]["cond_d"] else "-",
-                            "爆量表態":     "V" if q_long["Details"]["cond_c"] else "-",
-                            "月線斜率":     q_long.get("MA20_Slope_Pct", 0),
-                            "上軌斜率":     q_long.get("Upper_Slope_Pct", 0),
-                            "帶寬增長(%)":  q_long.get("Bandwidth_Chg", 0),
-                            "量比":         q_long.get("Vol_Ratio", 0),
-                            "上軌乖離(%)":  q_long.get("Pos_Upper", 0),
-                            "_q_data":      q_long,
-                        })
-                except Exception:
-                    pass
+        enrich_scan_rows_disposition(results_wanderer)
 
-            # ── 空方策略 ────────────────────────────────────────────────────
-            if len(df) >= 120:
-                try:
-                    _, q_short, _ = BollingerStrategy.analyze_short(df)
-                    det = q_short.get("Details", {})
-                    if det.get("cond_trend_bearish") and det.get("cond_ma20_slope_down"):
-                        results_short.append({
-                            **base_row,
-                            "空頭排列":      "V" if det["cond_trend_bearish"] else "-",
-                            "月線下彎":      "V" if det["cond_ma20_slope_down"] else "-",
-                            "沿下軌":        "V" if det.get("cond_near_lower_band") else "-",
-                            "月線斜率":      q_short.get("MA20_Slope", 0),
-                            "布林位置":      q_short.get("BB_Position_Ratio"),
-                            "季線乖離":      q_short.get("MA60_Bias", 0),
-                            "半年線乖離":    q_short.get("MA120_Bias", 0),
-                            "_q_data":       q_short,
-                        })
-                except Exception:
-                    pass
+        calc_elapsed = time.time() - t_calc
+        print(f"[Scanner #{scan_id}] 策略計算完成 ({calc_elapsed:.1f}s)")
 
-            # ── 浪子回頭策略 ─────────────────────────────────────────────────
-            if len(df) >= 60:
-                try:
-                    _, q_wand, _ = BollingerStrategy.analyze_wanderer(df)
-                    det = q_wand.get("Details", {})
-                    if det.get("cond_slope") and det.get("cond_bb_level"):
-                        disp_val = df.iloc[-1].get("Disposition_Mins", 0) or 0
-                        results_wanderer.append({
-                            **base_row,
-                            "月線斜率(%)":  round(q_wand.get("MA20_Slope_Pct", 0), 4),
-                            "布林位階":      round(q_wand.get("BB_Position", 0), 2),
-                            "布林上軌":      round(q_wand.get("BB_Upper", 0), 2),
-                            "布林中軌":      round(q_wand.get("BB_Middle", 0), 2),
-                            "布林下軌":      round(q_wand.get("BB_Lower", 0), 2),
-                            "處置狀態":      f"每 {int(disp_val)} 分鐘撮合" if disp_val > 0 else "-",
-                            "is_disposition": bool(disp_val > 0),
-                            "_q_data":       q_wand,
-                        })
-                except Exception:
-                    pass
-
-        conn_write = sqlite3.connect(str(_DB_PATH))
-        _ensure_signals_table(conn_write)
+        # ── 8. 寫入 user.db intraday_signals ──────────────────────────────
         _write_signals_to_db(
             scan_id, scan_time,
             {"long": results_long, "short": results_short, "wanderer": results_wanderer},
-            conn_write,
         )
-        conn_write.close()
-        conn.close()
 
         elapsed = round(time.time() - start_t, 1)
         msg = (
@@ -426,6 +514,8 @@ def _run_scan() -> None:
             "message": f"掃描失敗: {exc}",
         })
         print(f"[Scanner #{scan_id}] 掃描失敗: {exc}")
+    finally:
+        _scan_lock.release()
 
 
 # ── 非同步排程迴圈 ────────────────────────────────────────────────────────────
@@ -506,39 +596,58 @@ def get_scan_results(strategy: str = "long") -> List[Dict]:
     strategy: 'long' | 'short' | 'wanderer'
     """
     items = _SCAN_CACHE.get(strategy, [])
-    return [
+    out = [
         {k: v for k, v in item.items() if not k.startswith("_")}
         for item in items
     ]
+    if strategy == "wanderer":
+        enrich_scan_rows_disposition(out)
+    return out
 
 
 def get_last_signals_from_db(strategy: str = "long", limit: int = 200) -> List[Dict]:
     """
-    從 intraday_signals 表讀取最近一次掃描的結果（記憶體快取為空時的備援）。
+    從 user.db intraday_signals 讀取最近一次掃描結果（記憶體快取為空時的備援）。
     """
-    if not _DB_PATH.exists():
-        return []
+    out = get_latest_signals(strategy, limit)
+    if strategy == "wanderer":
+        enrich_scan_rows_disposition(out)
+    return out
+
+
+def _get_last_signals_from_db_old(strategy: str = "long", limit: int = 200) -> List[Dict]:
+    """舊實作保留供參考，已廢用。"""
     try:
-        conn = sqlite3.connect(str(_DB_PATH))
-        df = pd.read_sql(
-            """
-            SELECT *
-            FROM intraday_signals
-            WHERE strategy = ?
-              AND scan_time = (
-                  SELECT MAX(scan_time) FROM intraday_signals WHERE strategy = ?
-              )
-            ORDER BY close DESC
-            LIMIT ?
-            """,
-            conn,
-            params=[strategy, strategy, limit],
-        )
-        conn.close()
+        import json
+        result = get_latest_signals(strategy, limit)
+        return result
+    except Exception:
+        return []
+
+
+def _get_last_signals_from_db_compat(strategy: str = "long", limit: int = 200) -> List[Dict]:
+    """Read latest scan signals from user.db via the centralized user_db context manager."""
+    try:
+        import json
+        from backend.db.connection import user_db
+        with user_db() as conn:
+            df = pd.read_sql(
+                """
+                SELECT *
+                FROM intraday_signals
+                WHERE strategy = ?
+                  AND scan_time = (
+                      SELECT MAX(scan_time) FROM intraday_signals WHERE strategy = ?
+                  )
+                ORDER BY close DESC
+                LIMIT ?
+                """,
+                conn,
+                params=[strategy, strategy, limit],
+            )
         if df.empty:
             return []
         records = df.to_dict(orient="records")
-        # 解析 JSON blob
         for r in records:
             try:
                 r.update(json.loads(r.pop("signal_json", "{}")))
@@ -546,5 +655,12 @@ def get_last_signals_from_db(strategy: str = "long", limit: int = 200) -> List[D
                 pass
         return records
     except Exception as exc:
-        print(f"[Scanner DB fallback] {exc}")
+        print(f"[Scanner DB] {exc}")
         return []
+
+
+# ── 供 scheduler 呼叫的公開函式 ──────────────────────────────────────────────
+
+def run_scan() -> None:
+    """供 backend/scheduler.py 的 job_scanner 呼叫（同步）。"""
+    _run_scan()

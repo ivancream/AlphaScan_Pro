@@ -1,5 +1,7 @@
 import { useState } from 'react';
 
+import { API_V1_BASE } from '@/lib/apiBase';
+
 export const useChipsAnalysis = () => {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [reportStream, setReportStream] = useState('');
@@ -24,7 +26,7 @@ export const useChipsAnalysis = () => {
         });
 
         try {
-            const response = await fetch('http://localhost:8000/api/v1/chips/analyze', {
+            const response = await fetch(`${API_V1_BASE}/chips/analyze`, {
                 method: 'POST',
                 body: formData,
             });
@@ -78,7 +80,7 @@ export const useChipsAnalysis = () => {
         }
 
         try {
-            const response = await fetch('http://localhost:8000/api/v1/chips/ingest', {
+            const response = await fetch(`${API_V1_BASE}/chips/ingest`, {
                 method: 'POST',
                 body: formData,
             });
@@ -109,8 +111,8 @@ export const useWarrantPositions = () => {
         setIsLoading(true);
         try {
             const url = symbol
-                ? `http://localhost:8000/api/v1/chips/warrants?symbol=${symbol}`
-                : 'http://localhost:8000/api/v1/chips/warrants';
+                ? `${API_V1_BASE}/chips/warrants?symbol=${symbol}`
+                : `${API_V1_BASE}/chips/warrants`;
             const response = await fetch(url);
             if (!response.ok) throw new Error('Failed to fetch warrant positions');
             const data = await response.json();
@@ -137,8 +139,8 @@ export const useBranchTrading = () => {
         setIsLoading(true);
         try {
             const url = symbol
-                ? `http://localhost:8000/api/v1/chips/branch-trading?symbol=${symbol}`
-                : 'http://localhost:8000/api/v1/chips/branch-trading';
+                ? `${API_V1_BASE}/chips/branch-trading?symbol=${symbol}`
+                : `${API_V1_BASE}/chips/branch-trading`;
             const response = await fetch(url);
             if (!response.ok) throw new Error('Failed to fetch branch trading data');
             const data = await response.json();

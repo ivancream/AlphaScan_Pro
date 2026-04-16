@@ -1,254 +1,350 @@
-import React, { useState, useMemo, useCallback } from 'react';
-import Plot from 'react-plotly.js';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useHeatmapData, HeatmapStock } from '@/hooks/useHeatmap';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { useAppStore } from '@/store/useAppStore';
 import { useNavigate } from 'react-router-dom';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
 
-// ==========================================
-// 視野層級切換
-// ==========================================
-type ViewLevel = 'macro' | 'meso' | 'micro';
+type ViewLevel = 'macro' | 'micro';
 
 const VIEW_LABELS: Record<ViewLevel, { label: string; desc: string }> = {
-    macro: { label: '大視野', desc: '證交所官方產業分類' },
-    meso: { label: '中視野', desc: '次產業 (AI 分類)' },
-    micro: { label: '小視野', desc: '具體題材/產品線 (AI 分類)' },
+    macro: { label: '板塊', desc: '依主要產業分類聚合板塊' },
+    micro: { label: '族群', desc: '依題材聚合（可對應低軌衛星、CPO 等）' },
 };
 
-// ==========================================
-// 漲跌幅 → 顏色映射 (紅漲綠跌 台股慣例)
-// ==========================================
-function getHeatColor(changePct: number): string {
-    if (changePct >= 9.5) return '#FF0000';       // 漲停
+/** 板塊聚合列 */
+type SectorBlock = {
+    key: string;
+    label: string;
+    stocks: HeatmapStock[];
+    totalTurnover: number;
+    totalVolume: number;
+    avgChangePct: number;
+    upCount: number;
+    downCount: number;
+    flatCount: number;
+};
+
+type BlockSortKey = 'label' | 'turnover' | 'avg_change' | 'constituents' | 'up_count' | 'down_count';
+
+/** 板塊內成分股子表排序（僅前端，資料來自同一筆 heatmap API） */
+type ComponentSortKey = 'ticker' | 'name' | 'close' | 'change_pct' | 'turnover' | 'volume';
+
+const DEFAULT_COMPONENT_SORT: { key: ComponentSortKey; direction: 'asc' | 'desc' } = {
+    key: 'turnover',
+    direction: 'desc',
+};
+
+function sortComponentStocks(
+    stocks: HeatmapStock[],
+    cfg: { key: ComponentSortKey; direction: 'asc' | 'desc' }
+): HeatmapStock[] {
+    const list = [...stocks];
+    const { key, direction } = cfg;
+    const dir = direction === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+        let va: number | string;
+        let vb: number | string;
+        switch (key) {
+            case 'ticker':
+                va = a.ticker;
+                vb = b.ticker;
+                return String(va).localeCompare(String(vb), undefined, { numeric: true }) * dir;
+            case 'name':
+                va = a.name;
+                vb = b.name;
+                return String(va).localeCompare(String(vb), 'zh-Hant') * dir;
+            case 'close':
+                va = a.close;
+                vb = b.close;
+                break;
+            case 'change_pct': {
+                const sentinel = direction === 'asc' ? Infinity : -Infinity;
+                va = a.change_pct ?? sentinel;
+                vb = b.change_pct ?? sentinel;
+                break;
+            }
+            case 'turnover':
+                va = a.turnover;
+                vb = b.turnover;
+                break;
+            case 'volume':
+                va = a.volume;
+                vb = b.volume;
+                break;
+            default:
+                return 0;
+        }
+        if (va < vb) return -1 * dir;
+        if (va > vb) return 1 * dir;
+        return 0;
+    });
+    return list;
+}
+
+function getHeatColor(changePct: number | null): string {
+    if (changePct == null || Number.isNaN(changePct)) return '#757575';
+    if (changePct >= 9.5) return '#FF0000';
     if (changePct >= 5) return '#E53935';
     if (changePct >= 3) return '#EF5350';
     if (changePct >= 1) return '#EF9A9A';
     if (changePct >= 0.5) return '#FFCDD2';
-    if (changePct > -0.5) return '#424242';       // 平盤
+    if (changePct > -0.5) return '#424242';
     if (changePct > -1) return '#C8E6C9';
     if (changePct > -3) return '#81C784';
     if (changePct > -5) return '#4CAF50';
     if (changePct > -9.5) return '#2E7D32';
-    return '#1B5E20';                              // 跌停
+    return '#1B5E20';
 }
 
-// ==========================================
-// 組裝 Plotly Treemap 數據
-// ==========================================
-function buildTreemapData(
-    stocks: HeatmapStock[],
-    viewLevel: ViewLevel
-) {
-    // Treemap 需要 labels, parents, values, colors
-    const labels: string[] = [];
-    const parents: string[] = [];
-    const values: number[] = [];
-    const colors: string[] = [];
-    const customdata: any[] = [];
-    const ids: string[] = [];
-    const text: string[] = [];
+function sectorForView(s: HeatmapStock, view: ViewLevel): string {
+    const v = view === 'macro' ? s.macro : s.micro;
+    const t = (v ?? '').trim();
+    return t.length ? t : '（未分類）';
+}
 
-    // 根節點
-    const rootLabel = '全市場';
-    labels.push(rootLabel);
-    parents.push('');
-    values.push(0);
-    colors.push('#1a1a2e');
-    customdata.push({});
-    ids.push('root');
-    text.push('');
-
-    // 依 viewLevel 建立階層
-    const macroSet = new Set<string>();
-    const mesoSet = new Set<string>();
-
-    // 建立 macro 層
+function buildSectorBlocks(stocks: HeatmapStock[], viewLevel: ViewLevel): SectorBlock[] {
+    const map = new Map<string, HeatmapStock[]>();
     for (const s of stocks) {
-        const macroKey = `macro:${s.macro}`;
-        if (!macroSet.has(macroKey)) {
-            macroSet.add(macroKey);
-            labels.push(s.macro);
-            parents.push('root');
-            values.push(0);
-            colors.push('#2d2d44');
-            customdata.push({});
-            ids.push(macroKey);
-            text.push('');
-        }
+        const k = sectorForView(s, viewLevel);
+        if (!map.has(k)) map.set(k, []);
+        map.get(k)!.push(s);
     }
 
-    if (viewLevel === 'macro') {
-        // 大視野: macro → 個股
-        for (const s of stocks) {
-            const macroKey = `macro:${s.macro}`;
-            const stockId = `stock:${s.ticker}`;
-            labels.push(`${s.ticker} ${s.name}`);
-            parents.push(macroKey);
-            values.push(Math.max(s.turnover, 1));
-            colors.push(getHeatColor(s.change_pct));
-            customdata.push(s);
-            ids.push(stockId);
-            text.push(`${s.change_pct >= 0 ? '+' : ''}${s.change_pct}%`);
-        }
-    } else if (viewLevel === 'meso') {
-        // 中視野: macro → meso → 個股
-        for (const s of stocks) {
-            const macroKey = `macro:${s.macro}`;
-            const mesoKey = `meso:${s.macro}/${s.meso}`;
-            if (!mesoSet.has(mesoKey)) {
-                mesoSet.add(mesoKey);
-                labels.push(s.meso);
-                parents.push(macroKey);
-                values.push(0);
-                colors.push('#2d2d44');
-                customdata.push({});
-                ids.push(mesoKey);
-                text.push('');
-            }
-
-            const stockId = `stock:${s.ticker}`;
-            labels.push(`${s.ticker} ${s.name}`);
-            parents.push(mesoKey);
-            values.push(Math.max(s.turnover, 1));
-            colors.push(getHeatColor(s.change_pct));
-            customdata.push(s);
-            ids.push(stockId);
-            text.push(`${s.change_pct >= 0 ? '+' : ''}${s.change_pct}%`);
-        }
-    } else {
-        // 小視野: macro → meso → micro → 個股 (但層級太深 treemap 會太擁擠, 用 meso → micro 聚合)
-        const microSet = new Set<string>();
-
-        for (const s of stocks) {
-            const macroKey = `macro:${s.macro}`;
-            const mesoKey = `meso:${s.macro}/${s.meso}`;
-            const microKey = `micro:${s.macro}/${s.meso}/${s.micro}`;
-
-            if (!mesoSet.has(mesoKey)) {
-                mesoSet.add(mesoKey);
-                labels.push(s.meso);
-                parents.push(macroKey);
-                values.push(0);
-                colors.push('#2d2d44');
-                customdata.push({});
-                ids.push(mesoKey);
-                text.push('');
-            }
-
-            if (!microSet.has(microKey)) {
-                microSet.add(microKey);
-                labels.push(s.micro);
-                parents.push(mesoKey);
-                values.push(0);
-                colors.push('#3d3d55');
-                customdata.push({});
-                ids.push(microKey);
-                text.push('');
-            }
-
-            const stockId = `stock:${s.ticker}`;
-            labels.push(`${s.ticker} ${s.name}`);
-            parents.push(microKey);
-            values.push(Math.max(s.turnover, 1));
-            colors.push(getHeatColor(s.change_pct));
-            customdata.push(s);
-            ids.push(stockId);
-            text.push(`${s.change_pct >= 0 ? '+' : ''}${s.change_pct}%`);
-        }
+    const blocks: SectorBlock[] = [];
+    for (const [label, list] of map) {
+        const sortedList = [...list].sort((a, b) => b.turnover - a.turnover);
+        const totalTurnover = sortedList.reduce((a, b) => a + b.turnover, 0);
+        const totalVolume = sortedList.reduce((a, b) => a + b.volume, 0);
+        const forAvg = sortedList.filter((x) => x.change_pct != null);
+        const turnoverForAvg = forAvg.reduce((a, b) => a + b.turnover, 0);
+        const avgChangePct =
+            turnoverForAvg > 0
+                ? forAvg.reduce((a, b) => a + (b.change_pct as number) * b.turnover, 0) / turnoverForAvg
+                : forAvg.length > 0
+                  ? forAvg.reduce((a, b) => a + (b.change_pct as number), 0) / forAvg.length
+                  : 0;
+        const upCount = sortedList.filter((x) => x.change_pct != null && x.change_pct > 0).length;
+        const downCount = sortedList.filter((x) => x.change_pct != null && x.change_pct < 0).length;
+        const flatCount = sortedList.length - upCount - downCount;
+        blocks.push({
+            key: `${viewLevel}::${label}`,
+            label,
+            stocks: sortedList,
+            totalTurnover,
+            totalVolume,
+            avgChangePct: Math.round(avgChangePct * 100) / 100,
+            upCount,
+            downCount,
+            flatCount,
+        });
     }
-
-    return { labels, parents, values, colors, customdata, ids, text };
+    return blocks;
 }
 
-// ==========================================
-// 頁面組件
-// ==========================================
-export default function HeatmapPage() {
-    const [viewLevel, setViewLevel] = useState<ViewLevel>('meso');
+export default function CapitalFlowPage() {
+    const [viewLevel, setViewLevel] = useState<ViewLevel>('macro');
+    const [blockSort, setBlockSort] = useState<{ key: BlockSortKey; direction: 'asc' | 'desc' }>({
+        key: 'turnover',
+        direction: 'desc',
+    });
+    const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+    /** 每個板塊子表獨立排序狀態（key = block.key） */
+    const [componentSortByBlock, setComponentSortByBlock] = useState<
+        Record<string, { key: ComponentSortKey; direction: 'asc' | 'desc' }>
+    >({});
+
     const { data, isLoading, error, refetch } = useHeatmapData();
     const setSymbol = useAppStore((state) => state.setSymbol);
     const navigate = useNavigate();
 
-    // 組裝 Treemap 數據
-    const treemapData = useMemo(() => {
-        if (!data?.stocks?.length) return null;
-        return buildTreemapData(data.stocks, viewLevel);
-    }, [data, viewLevel]);
+    useEffect(() => {
+        setExpandedKeys(new Set());
+        setComponentSortByBlock({});
+    }, [viewLevel]);
 
-    // 點擊個股 → 跳轉技術分析
-    const handleStockClick = useCallback((eventData: any) => {
-        if (!eventData?.points?.[0]) return;
-        const point = eventData.points[0];
-        const id = point.id as string;
-        if (id?.startsWith('stock:')) {
-            const symbol = cleanStockSymbol(id.replace('stock:', ''));
-            setSymbol(symbol);
-            navigate(toStockDetailPath(symbol));
-        }
-    }, [setSymbol, navigate]);
+    const rawStocks = data?.stocks ?? [];
 
-    // 統計資訊
+    const sectorBlocks = useMemo(
+        () => buildSectorBlocks(rawStocks, viewLevel),
+        [rawStocks, viewLevel]
+    );
+
+    const sortedBlocks = useMemo(() => {
+        const list = [...sectorBlocks];
+        const { key, direction } = blockSort;
+        const dir = direction === 'asc' ? 1 : -1;
+        list.sort((a, b) => {
+            let va: number | string = 0;
+            let vb: number | string = 0;
+            switch (key) {
+                case 'label':
+                    va = a.label;
+                    vb = b.label;
+                    return String(va).localeCompare(String(vb), 'zh-Hant') * dir;
+                case 'turnover':
+                    va = a.totalTurnover;
+                    vb = b.totalTurnover;
+                    break;
+                case 'avg_change':
+                    va = a.avgChangePct;
+                    vb = b.avgChangePct;
+                    break;
+                case 'constituents':
+                    va = a.stocks.length;
+                    vb = b.stocks.length;
+                    break;
+                case 'up_count':
+                    va = a.upCount;
+                    vb = b.upCount;
+                    break;
+                case 'down_count':
+                    va = a.downCount;
+                    vb = b.downCount;
+                    break;
+                default:
+                    return 0;
+            }
+            if (typeof va === 'number' && typeof vb === 'number') {
+                if (va < vb) return -1 * dir;
+                if (va > vb) return 1 * dir;
+                return 0;
+            }
+            return 0;
+        });
+        return list;
+    }, [sectorBlocks, blockSort]);
+
+    const toggleBlock = useCallback((key: string) => {
+        setExpandedKeys((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    }, []);
+
+    const handleBlockSort = (key: BlockSortKey) => {
+        setBlockSort((prev) => {
+            if (prev.key === key) {
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return {
+                key,
+                direction: key === 'label' ? 'asc' : 'desc',
+            };
+        });
+    };
+
+    const renderBlockSortIcon = (key: BlockSortKey) => {
+        if (blockSort.key !== key) return <span className="shrink-0 opacity-20">↕</span>;
+        return blockSort.direction === 'asc' ? (
+            <span className="shrink-0 text-white">↑</span>
+        ) : (
+            <span className="shrink-0 text-white">↓</span>
+        );
+    };
+
+    const handleComponentSort = useCallback((blockKey: string, col: ComponentSortKey) => {
+        setComponentSortByBlock((prev) => {
+            const cur = prev[blockKey] ?? DEFAULT_COMPONENT_SORT;
+            const same = cur.key === col;
+            const direction = same
+                ? cur.direction === 'asc'
+                    ? 'desc'
+                    : 'asc'
+                : col === 'name' || col === 'ticker'
+                  ? 'asc'
+                  : 'desc';
+            return { ...prev, [blockKey]: { key: col, direction } };
+        });
+    }, []);
+
+    const renderComponentSortIcon = (blockKey: string, col: ComponentSortKey) => {
+        const cfg = componentSortByBlock[blockKey] ?? DEFAULT_COMPONENT_SORT;
+        if (cfg.key !== col) return <span className="ml-1 opacity-20">↕</span>;
+        return cfg.direction === 'asc' ? (
+            <span className="ml-1 text-orange-300/90">↑</span>
+        ) : (
+            <span className="ml-1 text-orange-300/90">↓</span>
+        );
+    };
+
+    const goStock = useCallback(
+        (ticker: string) => {
+            const sym = cleanStockSymbol(ticker);
+            setSymbol(sym);
+            navigate(toStockDetailPath(sym));
+        },
+        [setSymbol, navigate]
+    );
+
     const stats = useMemo(() => {
-        if (!data?.stocks?.length) return null;
-        const stocks = data.stocks;
-        const totalTurnover = stocks.reduce((sum, s) => sum + s.turnover, 0);
-        const upCount = stocks.filter(s => s.change_pct > 0).length;
-        const downCount = stocks.filter(s => s.change_pct < 0).length;
-        const flatCount = stocks.length - upCount - downCount;
-        return { totalTurnover, upCount, downCount, flatCount, total: stocks.length };
-    }, [data]);
+        if (!rawStocks.length) return null;
+        const totalTurnover = rawStocks.reduce((sum, s) => sum + s.turnover, 0);
+        const upCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct > 0).length;
+        const downCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct < 0).length;
+        const flatCount = rawStocks.length - upCount - downCount;
+        return { totalTurnover, upCount, downCount, flatCount, total: rawStocks.length };
+    }, [rawStocks]);
 
     return (
-        <div className="p-6 space-y-6 animate-in fade-in duration-500 text-gray-200 h-full flex flex-col">
-
-            {/* Header */}
+        <div className="p-6 space-y-6 animate-in fade-in duration-500 text-gray-200 h-full flex flex-col min-h-0">
             <div className="border-b border-gray-800 pb-4 shrink-0">
                 <div className="flex justify-between items-end">
                     <div>
                         <h2 className="text-3xl font-bold text-white tracking-widest flex items-center gap-3">
                             <span className="w-1.5 h-8 bg-orange-500 rounded-full inline-block"></span>
-                            資金流向熱力圖
+                            資金流向
                         </h2>
                         <p className="text-gray-400 mt-2 ml-4">
-                            以 Treemap 視覺化全市場資金分布，面積 = 成交金額，顏色 = 漲跌幅。
-                            {data?.date && <span className="text-gray-500 ml-2">資料日期: {data.date}</span>}
+                            板塊聚合：點列展開成分股子表（可欄位排序）；資料與列表同源、無額外請求。
+                            {data?.date && (
+                                <span className="text-gray-500 ml-2">資料日期: {data.date}</span>
+                            )}
+                            {data?.data_freshness && (
+                                <span className="text-gray-600 ml-2 text-xs">({data.data_freshness})</span>
+                            )}
                         </p>
                     </div>
-                    <div className="flex gap-3 items-center">
-                        {/* 重新整理 */}
-                        <button
-                            onClick={() => refetch()}
-                            disabled={isLoading}
-                            className="bg-[#1C2128] border border-gray-700 p-2 rounded-lg text-orange-400 hover:bg-[#2D333B] transition-colors"
-                        >
-                            <span className="material-symbols-outlined text-xl">refresh</span>
-                        </button>
-                    </div>
+                    <button
+                        type="button"
+                        onClick={() => refetch()}
+                        disabled={isLoading}
+                        className="h-9 px-3 rounded-lg border border-gray-700/70 bg-[#11161F] text-xs font-medium text-gray-300 hover:text-orange-300 hover:border-orange-500/40 hover:bg-[#171D28] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="手動重新抓取最新資料"
+                    >
+                        {isLoading ? '更新中...' : '手動更新'}
+                    </button>
                 </div>
             </div>
 
-            {/* 視野切換 + 統計資訊 */}
-            <div className="flex justify-between items-center shrink-0">
-                <div className="bg-[#0E1117] border border-gray-800 rounded-lg p-1 flex">
-                    {(Object.entries(VIEW_LABELS) as [ViewLevel, typeof VIEW_LABELS[ViewLevel]][]).map(([key, val]) => (
-                        <button
-                            key={key}
-                            onClick={() => setViewLevel(key)}
-                            className={`px-4 py-1.5 rounded-md text-sm font-bold transition-all ${viewLevel === key
-                                ? 'bg-orange-500 text-black'
-                                : 'text-gray-400 hover:text-white'
-                                }`}
-                            title={val.desc}
-                        >
-                            {val.label}
-                        </button>
-                    ))}
+            <div className="flex flex-wrap justify-between items-center gap-4 shrink-0">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                    <div className="bg-[#0E1117] border border-gray-800 rounded-lg p-1 flex flex-wrap">
+                        {(Object.entries(VIEW_LABELS) as [ViewLevel, (typeof VIEW_LABELS)[ViewLevel]][]).map(
+                            ([key, val]) => (
+                                <button
+                                    key={key}
+                                    type="button"
+                                    onClick={() => setViewLevel(key)}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-bold transition-all ${
+                                        viewLevel === key
+                                            ? 'bg-orange-500 text-black'
+                                            : 'text-gray-400 hover:text-white'
+                                    }`}
+                                    title={val.desc}
+                                >
+                                    {val.label}
+                                </button>
+                            )
+                        )}
+                    </div>
                 </div>
 
                 {stats && (
-                    <div className="flex gap-6 text-sm">
+                    <div className="flex gap-6 text-sm flex-wrap">
                         <div className="flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-red-500"></span>
                             <span className="text-gray-400">上漲</span>
@@ -275,85 +371,279 @@ export default function HeatmapPage() {
                 )}
             </div>
 
-            {/* 錯誤提示 */}
             {error && (
                 <div className="bg-red-900/20 border border-red-800 rounded-lg p-4 text-red-400 text-sm shrink-0">
                     {error}
                 </div>
             )}
 
-            {/* Treemap */}
-            <div className="flex-1 bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-2xl min-h-0">
-                {isLoading ? (
-                    <div className="p-12 h-full flex items-center justify-center">
+            <div className="flex-1 min-h-0 bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
+                {isLoading && !rawStocks.length ? (
+                    <div className="p-12 flex items-center justify-center">
                         <LoadingState text="載入全市場資金流向數據..." />
                     </div>
-                ) : treemapData ? (
-                    <Plot
-                        data={[
-                            {
-                                type: 'treemap' as any,
-                                ids: treemapData.ids,
-                                labels: treemapData.labels,
-                                parents: treemapData.parents,
-                                values: treemapData.values,
-                                text: treemapData.text,
-                                textinfo: 'label+text',
-                                marker: {
-                                    colors: treemapData.colors,
-                                    line: { width: 1, color: '#0E1117' },
-                                },
-                                hovertemplate:
-                                    '<b>%{label}</b><br>' +
-                                    '漲跌幅: %{text}<br>' +
-                                    '成交金額: %{value:,.0f}<br>' +
-                                    '<extra></extra>',
-                                textfont: {
-                                    color: '#E0E0E0',
-                                    size: 12,
-                                    family: 'Inter, sans-serif',
-                                },
-                                pathbar: {
-                                    visible: true,
-                                    textfont: { color: '#999', size: 12 },
-                                    thickness: 24,
-                                    edgeshape: '>',
-                                },
-                                branchvalues: 'total' as any,
-                                maxdepth: viewLevel === 'macro' ? 2 : viewLevel === 'meso' ? 3 : 4,
-                                tiling: {
-                                    packing: 'squarify' as any,
-                                    pad: 2,
-                                },
-                            } as any,
-                        ]}
-                        layout={{
-                            autosize: true,
-                            margin: { t: 30, l: 4, r: 4, b: 4, pad: 0 },
-                            paper_bgcolor: '#161B22',
-                            plot_bgcolor: '#161B22',
-                            font: {
-                                color: '#E0E0E0',
-                                family: 'Inter, sans-serif',
-                            },
-                        }}
-                        config={{
-                            responsive: true,
-                            displayModeBar: false,
-                            scrollZoom: false,
-                        }}
-                        style={{ width: '100%', height: '100%' }}
-                        useResizeHandler={true}
-                        onClick={handleStockClick}
-                    />
+                ) : sortedBlocks.length ? (
+                    <div className="overflow-auto flex-1">
+                        <table className="w-full text-sm text-left border-collapse">
+                            <thead className="sticky top-0 z-10 bg-[#0E1117] border-b border-gray-800">
+                                <tr className="text-gray-400 font-semibold align-middle">
+                                    <th
+                                        className="px-3 py-3 pl-4 cursor-pointer hover:text-white min-w-[12rem]"
+                                        onClick={() => handleBlockSort('label')}
+                                    >
+                                        <span className="inline-flex items-center gap-1">
+                                            {VIEW_LABELS[viewLevel].label}
+                                            {renderBlockSortIcon('label')}
+                                        </span>
+                                    </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right whitespace-nowrap"
+                                        onClick={() => handleBlockSort('constituents')}
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            成分家數
+                                            {renderBlockSortIcon('constituents')}
+                                        </span>
+                                    </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right whitespace-nowrap"
+                                        onClick={() => handleBlockSort('avg_change')}
+                                        title="平均漲跌幅以板塊內成交金額加權"
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            <span>
+                                                平均漲跌幅%
+                                                <span className="text-[10px] font-normal text-gray-500 ml-1">
+                                                    （成交加權）
+                                                </span>
+                                            </span>
+                                            {renderBlockSortIcon('avg_change')}
+                                        </span>
+                                    </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right whitespace-nowrap"
+                                        onClick={() => handleBlockSort('turnover')}
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            板塊總成交金額
+                                            {renderBlockSortIcon('turnover')}
+                                        </span>
+                                    </th>
+                                    <th className="px-3 py-3 text-right text-gray-500 whitespace-nowrap">
+                                        總成交量(張)
+                                    </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right whitespace-nowrap"
+                                        onClick={() => handleBlockSort('up_count')}
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            上漲家數
+                                            {renderBlockSortIcon('up_count')}
+                                        </span>
+                                    </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right pr-4 whitespace-nowrap"
+                                        onClick={() => handleBlockSort('down_count')}
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            下跌家數
+                                            {renderBlockSortIcon('down_count')}
+                                        </span>
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedBlocks.map((block) => {
+                                    const open = expandedKeys.has(block.key);
+                                    return (
+                                        <React.Fragment key={block.key}>
+                                            <tr
+                                                className="border-b border-gray-800/80 bg-[#1a1f2e]/90 hover:bg-[#252b3a]/90 cursor-pointer transition-colors"
+                                                onClick={() => toggleBlock(block.key)}
+                                            >
+                                                <td className="px-3 py-2.5 pl-3">
+                                                    <div className="flex items-start gap-2 min-w-0">
+                                                        <span className="shrink-0 mt-0.5 text-gray-500">
+                                                            {open ? (
+                                                                <ChevronDown className="w-4 h-4" />
+                                                            ) : (
+                                                                <ChevronRight className="w-4 h-4" />
+                                                            )}
+                                                        </span>
+                                                        <span
+                                                            className="text-gray-100 font-medium break-words"
+                                                            title={block.label}
+                                                        >
+                                                            {block.label}
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-gray-300">
+                                                    {block.stocks.length}
+                                                </td>
+                                                <td
+                                                    className="px-3 py-2.5 text-right font-mono font-bold"
+                                                    style={{ color: getHeatColor(block.avgChangePct) }}
+                                                >
+                                                    {block.avgChangePct >= 0 ? '+' : ''}
+                                                    {block.avgChangePct}%
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-orange-200/90">
+                                                    {(block.totalTurnover / 100000000).toFixed(2)} 億
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-gray-400">
+                                                    {block.totalVolume.toLocaleString()}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-red-400">
+                                                    {block.upCount}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-green-400 pr-4">
+                                                    {block.downCount}
+                                                </td>
+                                            </tr>
+                                            {open && (
+                                                <tr className="bg-[#0E1117]/60">
+                                                    <td colSpan={7} className="p-0 border-b border-gray-800/80">
+                                                        <div className="border-l-2 border-orange-500/50 ml-3 pl-2 pr-2 py-2 overflow-x-auto">
+                                                            <p className="text-[11px] text-gray-500 mb-2 pl-1">
+                                                                成分股穿透（與主表同一筆 API，依欄位即時排序）
+                                                            </p>
+                                                            <table className="w-full text-xs sm:text-sm border-collapse">
+                                                                <thead>
+                                                                    <tr className="text-gray-400 border-b border-gray-800/60">
+                                                                        <th
+                                                                            className="py-2 pr-3 text-left font-medium cursor-pointer hover:text-white select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'ticker');
+                                                                            }}
+                                                                        >
+                                                                            代號{renderComponentSortIcon(block.key, 'ticker')}
+                                                                        </th>
+                                                                        <th
+                                                                            className="py-2 pr-3 text-left font-medium cursor-pointer hover:text-white select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'name');
+                                                                            }}
+                                                                        >
+                                                                            名稱{renderComponentSortIcon(block.key, 'name')}
+                                                                        </th>
+                                                                        <th
+                                                                            className="py-2 pr-3 text-right font-medium cursor-pointer hover:text-white whitespace-nowrap select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'close');
+                                                                            }}
+                                                                        >
+                                                                            最新股價{renderComponentSortIcon(block.key, 'close')}
+                                                                        </th>
+                                                                        <th
+                                                                            className="py-2 pr-3 text-right font-medium cursor-pointer hover:text-white whitespace-nowrap select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'change_pct');
+                                                                            }}
+                                                                        >
+                                                                            漲跌幅%{renderComponentSortIcon(block.key, 'change_pct')}
+                                                                        </th>
+                                                                        <th
+                                                                            className="py-2 pr-3 text-right font-medium cursor-pointer hover:text-white whitespace-nowrap select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'volume');
+                                                                            }}
+                                                                        >
+                                                                            成交量(張){renderComponentSortIcon(block.key, 'volume')}
+                                                                        </th>
+                                                                        <th
+                                                                            className="py-2 text-right font-medium cursor-pointer hover:text-white whitespace-nowrap select-none"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                handleComponentSort(block.key, 'turnover');
+                                                                            }}
+                                                                        >
+                                                                            成交金額(億){renderComponentSortIcon(block.key, 'turnover')}
+                                                                        </th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {sortComponentStocks(
+                                                                        block.stocks,
+                                                                        componentSortByBlock[block.key] ??
+                                                                            DEFAULT_COMPONENT_SORT
+                                                                    ).map((s) => (
+                                                                        <tr
+                                                                            key={s.ticker}
+                                                                            className="border-b border-gray-800/40 hover:bg-[#161B22]"
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                        >
+                                                                            <td className="py-1.5 pr-4 font-mono">
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="text-orange-400 hover:underline"
+                                                                                    onClick={() => goStock(s.ticker)}
+                                                                                >
+                                                                                    {s.ticker}
+                                                                                </button>
+                                                                            </td>
+                                                                            <td className="py-1.5 pr-4 text-gray-300 max-w-[10rem] truncate">
+                                                                                {s.name}
+                                                                            </td>
+                                                                            <td className="py-1.5 pr-4 text-right font-mono text-gray-200">
+                                                                                {s.close.toFixed(2)}
+                                                                            </td>
+                                                                            <td
+                                                                                className="py-1.5 pr-3 text-right font-mono font-semibold"
+                                                                                style={{
+                                                                                    color: getHeatColor(s.change_pct),
+                                                                                }}
+                                                                                title={
+                                                                                    s.change_pct == null
+                                                                                        ? s.change_pct_basis === 'unreliable'
+                                                                                            ? '前後收盤價尺度不一致或資料異常，已不列入板塊平均（如面額變更、除權未還原等）'
+                                                                                            : '無法計算漲跌幅'
+                                                                                        : s.change_pct_basis === 'intraday'
+                                                                                          ? '與前收相比異常，已改採當日開盤→收盤漲跌幅'
+                                                                                          : undefined
+                                                                                }
+                                                                            >
+                                                                                {s.change_pct == null ? (
+                                                                                    <span className="text-gray-500 font-normal">—</span>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        {s.change_pct >= 0 ? '+' : ''}
+                                                                                        {s.change_pct}%
+                                                                                    </>
+                                                                                )}
+                                                                            </td>
+                                                                            <td className="py-1.5 pr-3 text-right font-mono text-gray-500">
+                                                                                {s.volume.toLocaleString()}
+                                                                            </td>
+                                                                            <td className="py-1.5 text-right font-mono text-gray-400">
+                                                                                {(s.turnover / 100000000).toFixed(2)}
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
                 ) : (
-                    <div className="h-full flex items-center justify-center text-gray-600">
+                    <div className="h-full flex items-center justify-center text-gray-600 p-12">
                         無資料可顯示
                     </div>
                 )}
             </div>
 
-            {/* 色階說明 */}
             <div className="flex items-center justify-center gap-1 text-xs text-gray-500 shrink-0 pb-2">
                 <span>跌停</span>
                 <div className="flex gap-0.5">

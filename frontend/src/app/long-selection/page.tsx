@@ -238,7 +238,7 @@ export default function SwingLongPage() {
                 <div>
                     <h2 className="text-3xl font-bold text-white tracking-widest flex items-center gap-3">
                         <span className="w-1.5 h-8 bg-red-500 rounded-full inline-block"></span>
-                        波段多方選股策略
+                        多方選股策略
                     </h2>
                 </div>
                 <div className="flex flex-col items-end gap-1">
@@ -314,14 +314,14 @@ export default function SwingLongPage() {
                                 checked={wandererFilters.req_slope} 
                                 onChange={(val) => setWandererFilters(prev => ({ ...prev, req_slope: val }))}
                                 desc="月線斜率翻揚 > 0.8%"
-                                color="amber"
+                                color="red"
                             />
                             <FilterCheckbox 
                                 label="布林位階" 
                                 checked={wandererFilters.req_bb_level} 
                                 onChange={(val) => setWandererFilters(prev => ({ ...prev, req_bb_level: val }))}
                                 desc="位階 < 4 (具備均值回歸空間)"
-                                color="amber"
+                                color="red"
                             />
                         </>
                     )}
@@ -427,9 +427,8 @@ export default function SwingLongPage() {
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('收盤價')}>股價{renderSortIcon('收盤價')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('今日漲跌幅(%)')}>漲跌幅{renderSortIcon('今日漲跌幅(%)')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交量(張)')}>成交量(張){renderSortIcon('成交量(張)')}</th>
-                                            <th className="px-6 py-4 text-amber-400 font-bold cursor-pointer hover:text-amber-300" onClick={() => handleSort('月線斜率(%)')}>月線斜率(%){renderSortIcon('月線斜率(%)')}</th>
-                                            <th className="px-6 py-4 text-amber-400 font-bold cursor-pointer hover:text-amber-300" onClick={() => handleSort('布林位階')}>布林位階{renderSortIcon('布林位階')}</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交額(億)')}>成交額(億){renderSortIcon('成交額(億)')}</th>
+                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('月線斜率(%)')}>月線斜率(%){renderSortIcon('月線斜率(%)')}</th>
+                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('布林位階')}>布林位階{renderSortIcon('布林位階')}</th>
                                             <th className="px-6 py-4 text-red-400 font-bold cursor-pointer hover:text-red-300" onClick={() => handleSort('處置狀態')}>處置狀態{renderSortIcon('處置狀態')}</th>
                                         </tr>
                                     </thead>
@@ -456,19 +455,14 @@ export default function SwingLongPage() {
                                                 >
                                                     {item['代號']} ↗
                                                 </td>
-                                                <td className="px-6 py-4 font-medium text-white">{item['名稱']}</td>
-                                                <td className="px-6 py-4 text-gray-400">{item['產業']}</td>
-                                                <td className="px-6 py-4 font-mono">{Number(item['收盤價']).toFixed(1)}</td>
+                                                <td className="px-6 py-4 font-medium text-white whitespace-nowrap">{item['名稱']}</td>
+                                                <td className="px-6 py-4 text-gray-400 whitespace-nowrap">{item['產業']}</td>
+                                                <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item['收盤價']).toFixed(1)}</td>
                                                 <td className={`px-6 py-4 font-mono ${getChangePctColor(item['今日漲跌幅(%)'])}`}>{Number(item['今日漲跌幅(%)']).toFixed(2)}%</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['成交量(張)']).toLocaleString()}</td>
-                                                <td className="px-6 py-4 font-mono text-amber-300 font-bold">{Number(item['月線斜率(%)']).toFixed(1)}</td>
-                                                <td className="px-6 py-4 font-mono font-bold">
-                                                    <span className={Number(item['布林位階']) < 0 ? 'text-green-400 bg-green-900/50 px-2 py-1 rounded' : 'text-green-400'}>
-                                                        {Number(item['布林位階']).toFixed(1)}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4 font-mono text-amber-400">{Number(item['成交額(億)']).toFixed(2)}</td>
-                                                <td className="px-6 py-4 font-bold text-red-400">{item['處置狀態']}</td>
+                                                <td className="px-6 py-4 font-mono">{Number(item['月線斜率(%)']).toFixed(1)}</td>
+                                                <td className="px-6 py-4 font-mono">{Number(item['布林位階']).toFixed(1)}</td>
+                                                <td className="px-6 py-4 font-mono">{String(item['處置狀態'] ?? '-')}</td>
                                             </tr>
                                         ))}
                                     </tbody>

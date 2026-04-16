@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Set
 
 from pydantic import BaseModel
 
-from backend.settings import get_sinopac_env, sinopac_credentials_configured
+from backend.settings import sinopac_credentials_configured
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -118,18 +118,19 @@ class AllAroundEngine:
     ) -> None:
         if self._running:
             return
-        self._running = True
-        self._loop = asyncio.get_event_loop()
 
         if not sinopac_credentials_configured():
             self._last_error = "永豐金 API Key 未設定，全方位監控未啟動"
             print(f"[AllAround] {self._last_error}")
             return
 
+        self._running = True
+        self._loop = asyncio.get_event_loop()
+
         try:
             await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self._connect_shioaji(
+                lambda: self._bootstrap_shared_session(
                     stk_symbols=stk_symbols or [],
                     futures_prefixes=futures_prefixes or _DEFAULT_FUTURES_PREFIX,
                 ),
@@ -137,53 +138,47 @@ class AllAroundEngine:
         except Exception as exc:  # noqa: BLE001
             self._last_error = str(exc)
             self._shioaji_active = False
+            self._running = False
             print(f"[AllAround] 連線失敗: {exc}")
 
     async def stop(self) -> None:
         self._running = False
-        if self._api is not None:
-            try:
-                self._api.logout()
-            except Exception:  # noqa: BLE001
-                pass
-            self._api = None
+        # 共享 Session 由 sinopac_session.disconnect() 登出；此處不可 logout，否則會踢掉 LiveQuote／Scanner。
+        self._api = None
+        self._shioaji_active = False
         print("[AllAround] 已停止")
 
-    # ── Shioaji 連線 ─────────────────────────────────────────────────────────
+    # ── 共享 Shioaji Session（與 LiveQuote／Scanner 同一登入）──────────────────
 
-    def _connect_shioaji(
+    def _bootstrap_shared_session(
         self,
         stk_symbols:      List[str],
         futures_prefixes: List[str],
     ) -> None:
-        import shioaji as sj
+        """
+        使用 sinopac_session 已登入的 api，透過 add_stk_handler / add_fop_handler
+        接收 master tick 分發。禁止在此另建 Shioaji()，否則會覆蓋 callback 或互踢 Session。
+        """
+        from backend.engines.sinopac_session import sinopac_session
+
         import shioaji.constant as sjc
 
-        creds = get_sinopac_env()
-        api = sj.Shioaji(simulation=creds["simulation"])
-        api.login(
-            api_key=creds["api_key"],
-            secret_key=creds["secret_key"],
-            fetch_contract=True,
-        )
+        api = sinopac_session.api
+        if api is None:
+            self._last_error = "永豐金共享 Session 未連線（startup 登入失敗或未設定金鑰）"
+            self._shioaji_active = False
+            self._running = False
+            print(f"[AllAround] {self._last_error}")
+            return
+
         self._api = api
-        loop = self._loop
+        sinopac_session.add_stk_handler(self._dispatch_stk_sync)
+        sinopac_session.add_fop_handler(self._dispatch_fop_sync)
+        print("[AllAround] 已註冊 STK/FOP Tick 分發器（共享 Session）")
 
-        # ── 股票 / ETF / 權證 Tick v1 回調 ───────────────────────────────────
-        @api.on_tick_stk_v1()
-        def _on_stk(exchange, tick):
-            asyncio.run_coroutine_threadsafe(self._handle_stk_tick(tick), loop)
-
-        # ── 期貨 / 選擇權 Tick v1 回調 ───────────────────────────────────────
-        @api.on_tick_fop_v1()
-        def _on_fop(exchange, tick):
-            asyncio.run_coroutine_threadsafe(self._handle_fop_tick(tick), loop)
-
-        # 訂閱股票
         for symbol in stk_symbols:
             self._subscribe_stk(symbol, api, sjc)
 
-        # 訂閱期貨（近月）
         for prefix in futures_prefixes:
             self._subscribe_fop_by_prefix(prefix, api, sjc)
 
@@ -192,6 +187,23 @@ class AllAroundEngine:
             f"[AllAround] 啟動完成 | "
             f"STK={len(self._subscribed_stk)} FOP={len(self._subscribed_fop)}"
         )
+
+    def _dispatch_stk_sync(self, exchange, tick) -> None:
+        """由 sinopac_session master callback 呼叫（同步、非 asyncio 執行緒）。"""
+        if self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._handle_stk_tick(tick), self._loop)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _dispatch_fop_sync(self, exchange, tick) -> None:
+        if self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._handle_fop_tick(tick), self._loop)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── 訂閱邏輯 ─────────────────────────────────────────────────────────────
 
@@ -254,10 +266,26 @@ class AllAroundEngine:
             print(f"[AllAround] FOP {prefix} 失敗: {exc}")
 
     def add_stk_symbols(self, symbols: List[str]) -> None:
-        if self._api is None:
+        """個股頁 WS 連線時動態訂閱；即使 start() 未成功，仍嘗試使用共享 Session。"""
+        from backend.engines.sinopac_session import sinopac_session
+
+        api = self._api or sinopac_session.api
+        if api is None:
             return
+
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return
+
+        self._api = api
+        sinopac_session.add_stk_handler(self._dispatch_stk_sync)
+        sinopac_session.add_fop_handler(self._dispatch_fop_sync)
+
         try:
             import shioaji.constant as sjc
+
             for symbol in symbols:
                 self._subscribe_stk(symbol, self._api, sjc)
         except Exception as exc:  # noqa: BLE001

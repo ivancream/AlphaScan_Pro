@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
-import duckdb
 from datetime import datetime, timedelta
 
 router = APIRouter()
@@ -11,40 +10,28 @@ router = APIRouter()
 class ScanFloorBounceResponse(BaseModel):
     results: List[Dict[str, Any]]
 
+from backend.db import queries as _db_queries
+from backend.db.symbol_utils import strip_suffix as _strip_suffix
+
+
 def fetch_stock_data(stock_code: str) -> pd.DataFrame:
-    """從 DuckDB 獲取歷史 K 線數據以供地板股分析"""
+    """從 DuckDB daily_prices 取得歷史 K 線數據。"""
     try:
-        symbol = str(stock_code).strip().upper()
-        if symbol.isdigit():
-            symbol = f"{symbol}.TW"
-            
-        with duckdb.connect('data/market.duckdb') as conn:
-            df = conn.execute(f"""
-                SELECT date, open, high, low, close as close, volume as volume
-                FROM historical_prices
-                WHERE symbol = '{symbol}'
-                ORDER BY date ASC
-            """).df()
-            
+        sid = _strip_suffix(str(stock_code).strip().upper())
+        df = _db_queries.get_price_df(sid, period="max")
         if df.empty:
             return None
-        
-        df.set_index('date', inplace=True)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
         return df
-    except Exception as e:
-        print(f"DuckDB fetch error: {e}")
+    except Exception as exc:
+        print(f"[FloorBounce] fetch error: {exc}")
         return None
 
+
 def get_stock_name(stock_code: str) -> str:
-    """查詢股票名稱 (嘗試從 legacy sqlite 查詢，如果沒有就回傳代號)"""
-    try:
-        import sqlite3
-        with sqlite3.connect("data/taiwan_stock.db") as conn:
-            cursor = conn.execute(f"SELECT name FROM stock_info WHERE stock_id='{stock_code}'")
-            result = cursor.fetchone()
-            return result[0] if result else stock_code
-    except:
-        return stock_code
+    """查詢股票名稱。"""
+    return _db_queries.get_stock_name(_strip_suffix(str(stock_code).strip()))
 
 @router.get("/api/v1/floor-bounce/scan", response_model=ScanFloorBounceResponse)
 async def scan_floor_bounce(
@@ -56,16 +43,13 @@ async def scan_floor_bounce(
     掃描全台股乖離率通道，找出靠近「統計地板」或「天花板」的股票
     """
     try:
-        import sqlite3
-        # 從 legacy DB 拿股票清單，因為裡面存有 is_active
-        with sqlite3.connect("data/taiwan_stock.db") as conn:
-            if filter_inactive:
-                cursor = conn.execute("SELECT stock_id FROM stock_info WHERE is_active = 1")
-            else:
-                cursor = conn.execute("SELECT stock_id FROM stock_info")
-            stocks = [row[0] for row in cursor.fetchall()]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read stock list: {e}")
+        if filter_inactive:
+            info_df = _db_queries.get_active_stocks()
+        else:
+            info_df = _db_queries.get_stock_info_df()
+        stocks = info_df["stock_id"].tolist() if not info_df.empty else []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read stock list: {exc}")
 
     results = []
     

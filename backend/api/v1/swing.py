@@ -10,15 +10,18 @@
 路徑 3 完成後同步寫入 StaticCache，後續讀取瞬間回傳。
 """
 import asyncio
-from functools import partial
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 from pydantic import BaseModel
 from typing import Any, Dict, List
 
-from engines import engine_technical
-from engines.engine_intraday_scanner import _SCAN_CACHE, _run_scan as _intraday_run_scan
+from engines.engine_intraday_scanner import (
+    _SCAN_CACHE,
+    _run_scan as _intraday_run_scan,
+    get_last_signals_from_db,
+)
 from backend.engines.cache_store import StaticCache, TTL_12H
+from backend.engines.disposition_overlay import enrich_scan_rows_disposition
 
 router = APIRouter()
 
@@ -39,6 +42,13 @@ def _strip_private(items: List[Dict]) -> List[Dict]:
 def _get_intraday(strategy: str) -> List[Dict]:
     """從盤中排程快取讀取指定策略結果（非同步安全：純字典讀取）。"""
     return _strip_private(_SCAN_CACHE.get(strategy, []))
+
+
+def _finalize_wanderer_results(items: List[Dict]) -> List[Dict]:
+    """淺拷貝後依 disposition_events 補齊處置欄位（StaticCache／舊掃描結果相容）。"""
+    out = [dict(r) for r in items]
+    enrich_scan_rows_disposition(out)
+    return out
 
 
 # ── 多方布林突破 ───────────────────────────────────────────────────────────────
@@ -71,17 +81,12 @@ async def scan_swing_long(
         response.headers["X-Cache"] = "HIT"
         return {"results": intraday, "cached": True, "source": "intraday_cache"}
 
-    # ── 路徑 3：全市場掃描（慢路徑，同時觸發排程快取預熱） ──────────────────
+    # ── 路徑 3：非阻塞回應，掃描改背景預熱（避免 API 逾時） ────────────────
     background_tasks.add_task(_maybe_warm_scanner)
     try:
-        loop = asyncio.get_event_loop()
-        fn   = partial(
-            engine_technical.BollingerStrategy.screen_from_db,
-            strategy="long",
-            req_ma=req_ma, req_vol=req_vol, req_slope=req_slope,
-        )
-        results, _ = await loop.run_in_executor(None, fn)
-        StaticCache.set(key, results, ttl=TTL_12H)
+        results = _strip_private(get_last_signals_from_db("long", limit=500))
+        if results:
+            StaticCache.set(key, results, ttl=TTL_12H)
         response.headers["Cache-Control"] = _CACHE_CONTROL
         response.headers["X-Cache"] = "MISS"
         return {"results": results, "cached": False, "source": "live"}
@@ -117,15 +122,9 @@ async def scan_swing_short(
 
     background_tasks.add_task(_maybe_warm_scanner)
     try:
-        loop = asyncio.get_event_loop()
-        fn   = partial(
-            engine_technical.BollingerStrategy.screen_from_db,
-            strategy="short",
-            req_ma=req_ma, req_slope=req_slope,
-            req_chips=req_chips, req_near_band=req_near_band,
-        )
-        results, _ = await loop.run_in_executor(None, fn)
-        StaticCache.set(key, results, ttl=TTL_12H)
+        results = _strip_private(get_last_signals_from_db("short", limit=500))
+        if results:
+            StaticCache.set(key, results, ttl=TTL_12H)
         response.headers["X-Cache"] = "MISS"
         return {"results": results, "cached": False, "source": "live"}
     except Exception as e:
@@ -146,23 +145,20 @@ async def scan_swing_wanderer(
     cached = StaticCache.get(key)
     if cached is not None:
         response.headers["X-Cache"] = "HIT"
-        return {"results": cached, "cached": True, "source": "static_cache"}
+        return {"results": _finalize_wanderer_results(cached), "cached": True, "source": "static_cache"}
 
     intraday = _get_intraday("wanderer")
     if intraday:
-        StaticCache.set(key, intraday, ttl=TTL_12H)
+        enriched = _finalize_wanderer_results(intraday)
+        StaticCache.set(key, enriched, ttl=TTL_12H)
         response.headers["X-Cache"] = "HIT"
-        return {"results": intraday, "cached": True, "source": "intraday_cache"}
+        return {"results": enriched, "cached": True, "source": "intraday_cache"}
 
     background_tasks.add_task(_maybe_warm_scanner)
     try:
-        loop = asyncio.get_event_loop()
-        fn   = partial(
-            engine_technical.BollingerStrategy.screen_wanderer_from_db,
-            req_slope=req_slope, req_bb_level=req_bb_level,
-        )
-        results, _ = await loop.run_in_executor(None, fn)
-        StaticCache.set(key, results, ttl=TTL_12H)
+        results = _strip_private(get_last_signals_from_db("wanderer", limit=500))
+        if results:
+            StaticCache.set(key, results, ttl=TTL_12H)
         response.headers["X-Cache"] = "MISS"
         return {"results": results, "cached": False, "source": "live"}
     except Exception as e:
@@ -188,5 +184,6 @@ def _maybe_warm_scanner() -> None:
     if _SCAN_CACHE.get("status") not in ("running",):
         try:
             _intraday_run_scan()
+            StaticCache.invalidate_prefix("swing:")
         except Exception as exc:
             print(f"[swing warm-up] 背景掃描失敗: {exc}")
