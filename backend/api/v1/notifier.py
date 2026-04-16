@@ -72,6 +72,9 @@ async def get_notification_config():
     cfg = _notifier.get_webhook_config()
     return {
         "notify_on_scan_enabled": _notifier.is_notify_enabled(),
+        "notify_only_new_triggers": os.getenv(
+            "DISCORD_NOTIFY_ONLY_NEW_TRIGGERS", "true"
+        ).lower() in ("1", "true", "yes"),
         "max_stocks_per_message": int(os.getenv("DISCORD_MAX_STOCKS", "10")),
         "webhooks": {
             "long":      {"label": "多方選股", "url_preview": cfg.get("long")},

@@ -6,6 +6,7 @@
 - GET  /api/v1/heatmap/data     — 取得熱力圖數據 (含三層產業分類 + 漲跌幅/成交金額)
 """
 
+import asyncio
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -24,6 +25,7 @@ class HeatmapStock(BaseModel):
     macro: str
     meso: str
     micro: str
+    micros: Optional[List[str]] = None
     close: float
     change_pct: Optional[float] = None  # 資料異常時為 None，不列入板塊加權
     turnover: int
@@ -38,6 +40,7 @@ class HeatmapDataResponse(BaseModel):
     # duckdb_daily_prices；盤中由排程批次寫入，非本端點即時打 yfinance/Shioaji
     price_source: Optional[str] = None
     ingest_path: Optional[str] = None
+    theme_micro_ticker_count: Optional[int] = None
 
 # ==========================================
 # Endpoints
@@ -49,7 +52,9 @@ async def get_heatmap_data():
     價量僅讀 DuckDB daily_prices（由排程批次 snapshots／yf batch 寫入）；不經 LiveQuote 快取。
     """
     try:
-        data = engine_heatmap.get_heatmap_data()
+        # DuckDB 為全域鎖；同步查詢會阻塞事件迴圈，啟動 catchup 寫庫時易讓前端代理逾時 (502)
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, engine_heatmap.get_heatmap_data)
         return data
     except Exception as e:
         print(f"[Heatmap API] Error: {e}")

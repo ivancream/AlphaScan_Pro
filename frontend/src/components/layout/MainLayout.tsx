@@ -36,6 +36,7 @@ const NAV_GROUPS: NavGroup[] = [
     {
         title: '選股監控',
         subtitle: '高頻',
+        separated: true,
         showStockNav: true,
         items: [
             { href: '/watchlist', icon: <Star size={18} />, label: '自選清單' },

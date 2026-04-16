@@ -481,7 +481,7 @@ export default function CorrelationPage() {
                 <label className="text-xs text-gray-500 font-black uppercase tracking-widest">股票 A（主）</label>
                 <input
                   type="text"
-                  placeholder="如 2330"
+                  placeholder="輸入股票代號..."
                   value={stockA}
                   onChange={(e) => setStockA(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSpreadSearch()}
@@ -493,7 +493,7 @@ export default function CorrelationPage() {
                 <label className="text-xs text-gray-500 font-black uppercase tracking-widest">股票 B（分母）</label>
                 <input
                   type="text"
-                  placeholder="如 2317"
+                  placeholder="輸入股票代號..."
                   value={stockB}
                   onChange={(e) => setStockB(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSpreadSearch()}

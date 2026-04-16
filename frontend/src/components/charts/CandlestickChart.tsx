@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
     createChart,
     ColorType,
@@ -45,6 +45,9 @@ type ChartDatum = {
     rs_ma?: number | null;
 };
 
+/** 穩定空陣列參考，避免 useEffect 依賴每次 render 都變成新 [] 而無限觸發 */
+const EMPTY_CHART_DATA: ChartDatum[] = [];
+
 function isFiniteNumber(value: number | null | undefined): value is number {
     return typeof value === 'number' && Number.isFinite(value);
 }
@@ -64,7 +67,10 @@ export const CandlestickChart = ({ symbol, indicator1, indicator2 }: Props) => {
     const seriesRefs = useRef<ISeriesApi<SeriesType>[]>([]);
 
     const { data, isLoading, isError } = useHistoricalData(symbol, 400);
-    const chartData = (data?.data ?? []) as ChartDatum[];
+    const chartData = useMemo(() => {
+        const rows = data?.data;
+        return (Array.isArray(rows) && rows.length > 0 ? rows : EMPTY_CHART_DATA) as ChartDatum[];
+    }, [data]);
 
     const renderIndicator = (
         chart: IChartApi,

@@ -16,7 +16,13 @@ export default defineConfig({
     strictPort: true,
     host: "localhost",
     proxy: {
-      "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      // 全市場 heatmap / catchup 競爭 DuckDB 時回應可能超過預設逾時，避免 Vite 回 502
+      "/api": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        timeout: 180_000,
+        proxyTimeout: 180_000,
+      },
       "/ws": { target: "ws://127.0.0.1:8000", ws: true },
     },
   },

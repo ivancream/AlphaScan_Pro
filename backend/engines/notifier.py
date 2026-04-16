@@ -12,8 +12,9 @@ Discord Webhook 警報模組 (AlphaScan Pro Notifier)
   DISCORD_WEBHOOK_LONG       多方選股 Webhook URL
   DISCORD_WEBHOOK_SHORT      空方選股 Webhook URL
   DISCORD_WEBHOOK_WATCHLIST  自選清單 Webhook URL
-  DISCORD_NOTIFY_ON_SCAN     掃描完成後是否自動推送 (true/false，預設 false)
-  DISCORD_MAX_STOCKS         每則訊息最多顯示幾檔（預設 10）
+  DISCORD_NOTIFY_ON_SCAN          掃描完成後是否自動推送 (true/false，預設 false)
+  DISCORD_NOTIFY_ONLY_NEW_TRIGGERS 僅推送「與上一輪掃描相比新進榜」標的 (true/false，預設 true)
+  DISCORD_MAX_STOCKS               每則訊息最多顯示幾檔（預設 10）
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -156,6 +157,8 @@ def build_scan_embeds(
     results: List[Dict],
     scan_id: str,
     scan_time: str,
+    *,
+    variant: str = "full",
 ) -> List[Dict]:
     """
     將掃描結果拆成多組 Embed payload（每組最多 10 檔），避免超過 Discord 字數上限。
@@ -175,6 +178,9 @@ def build_scan_embeds(
         "wanderer": ("🔄 浪子回頭", COLOR_INFO,  "布林回歸均值候選"),
     }
     label, color, subtitle = strategy_meta.get(strategy, ("🔔 選股訊號", COLOR_INFO, ""))
+    is_new_only = variant == "new_triggers"
+    title_action = "新觸發" if is_new_only else "掃描完成"
+    subtitle_line = "本輪新進榜標的" if is_new_only else subtitle
 
     max_n = _max_stocks()
     chunks = [results[i : i + max_n] for i in range(0, max(len(results), 1), max_n)]
@@ -185,8 +191,8 @@ def build_scan_embeds(
         page_tag = f"（第 {page_idx + 1}/{total_pages} 頁）" if total_pages > 1 else ""
 
         description = (
-            f"**{subtitle}** {page_tag}\n"
-            f"本次共 **{len(results)}** 檔符合條件\n"
+            f"**{subtitle_line}** {page_tag}\n"
+            f"本次共 **{len(results)}** 檔{'新觸發' if is_new_only else '符合條件'}\n"
             f"掃描批次：`{scan_id}` ｜ 時間：`{scan_time[:19]}`"
         )
 
@@ -227,7 +233,7 @@ def build_scan_embeds(
             })
 
         embed: Dict[str, Any] = {
-            "title":       f"{label}掃描完成",
+            "title":       f"{label}{title_action}",
             "description": description,
             "color":       color,
             "fields":      fields,
@@ -248,16 +254,23 @@ async def notify_scan_results(
     results_short: List[Dict],
     scan_id: str,
     scan_time: str,
+    *,
+    only_new_triggers: bool = False,
 ) -> Dict[str, Any]:
     """
     掃描完成後推送多方 / 空方結果至各自的 Discord Webhook。
     若 DISCORD_NOTIFY_ON_SCAN != true 則直接跳過。
+    only_new_triggers=True 時 Embed 標題與說明改為「新觸發」（payload 應已由掃描器做差集）。
 
     Returns:
         {"long": [...結果], "short": [...結果]}
     """
     if not is_notify_enabled():
         return {"skipped": True, "reason": "DISCORD_NOTIFY_ON_SCAN 未啟用"}
+
+    embed_variant = "new_triggers" if only_new_triggers else "full"
+    if not results_long and not results_short:
+        return {"skipped": True, "reason": "無待推送標的"}
 
     url_long  = _get_env("DISCORD_WEBHOOK_LONG")
     url_short = _get_env("DISCORD_WEBHOOK_SHORT")
@@ -266,7 +279,9 @@ async def notify_scan_results(
     async def _send_strategy(url: str, strategy: str, results: List[Dict]) -> List[Dict]:
         if not url or not results:
             return []
-        payloads = build_scan_embeds(strategy, results, scan_id, scan_time)
+        payloads = build_scan_embeds(
+            strategy, results, scan_id, scan_time, variant=embed_variant
+        )
         outcomes = []
         for payload in payloads:
             r = await _async_post(url, payload)

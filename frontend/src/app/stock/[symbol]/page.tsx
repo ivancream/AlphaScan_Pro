@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { Virtuoso } from 'react-virtuoso';
 import {
   AlertCircle,
-  BarChart3,
+  ListOrdered,
   CandlestickChart as CandlestickIcon,
   Radio,
   RefreshCw,
@@ -20,15 +21,16 @@ import { useTechnicalIndicators } from '@/hooks/useTechnical';
 import { cleanStockSymbol } from '@/lib/stocks';
 import { useAppStore } from '@/store/useAppStore';
 import type { IndicatorType } from '@/types/chart';
+import type { UnifiedTick } from '@/types/quote';
 
 // ─── Tab 定義 ─────────────────────────────────────────────────────────────────
 
-type Tab = 'kline' | 'intraday' | 'tape';
+type Tab = 'kline' | 'intraday' | 'ticks';
 
 const TABS: { id: Tab; icon: React.ReactNode; label: string }[] = [
   { id: 'kline',    icon: <CandlestickIcon size={15} />, label: '技術K線' },
   { id: 'intraday', icon: <TrendingUp size={15} />,       label: '即時走勢' },
-  { id: 'tape',     icon: <TableProperties size={15} />,  label: '流水成交' },
+  { id: 'ticks',    icon: <ListOrdered size={15} />,      label: '逐筆明細' },
 ];
 
 // ─── Chart period (未來擴充 15/60 分K 只需在此加項目) ─────────────────────────
@@ -60,6 +62,33 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry?: () => voi
 
 const INDICATOR_OPTIONS: IndicatorType[] = ['Volume', 'MACD', 'RSI', 'KD', 'Bias', 'OBV', 'RS', 'None'];
 
+function TapeRow({ tick }: { tick: UnifiedTick }) {
+  const isOuter = tick.tick_dir === 'OUTER';
+  const isInner = tick.tick_dir === 'INNER';
+  const priceAccent = isOuter ? 'text-red-400' : isInner ? 'text-emerald-400' : 'text-gray-300';
+  const dirLabel = isOuter ? '外盤' : isInner ? '內盤' : '—';
+  const dirBadge = isOuter
+    ? 'bg-red-900/30 text-red-400 border-red-800/30'
+    : isInner
+      ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800/30'
+      : 'bg-gray-800/30 text-gray-500 border-gray-700/30';
+
+  return (
+    <div className="flex items-center border-b border-gray-800/50 text-sm font-mono px-4 py-2 hover:bg-white/[0.03]">
+      <span className="w-[88px] shrink-0 text-gray-500 text-xs">{tick.ts}</span>
+      <span className={`flex-1 text-right font-bold ${priceAccent}`}>{tick.price.toFixed(2)}</span>
+      <span className={`w-[88px] text-right text-xs ${tick.pct_chg >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+        {tick.pct_chg > 0 ? '+' : ''}
+        {tick.pct_chg.toFixed(2)}%
+      </span>
+      <span className="w-[72px] text-right text-gray-400 text-xs">{tick.volume.toLocaleString()}</span>
+      <span className="w-[72px] flex justify-end">
+        <span className={`text-[10px] font-bold border rounded px-2 py-0.5 ${dirBadge}`}>{dirLabel}</span>
+      </span>
+    </div>
+  );
+}
+
 function IndicatorSelect({
   value,
   onChange,
@@ -87,6 +116,7 @@ function IndicatorSelect({
 export default function StockDetailPage() {
   const params = useParams<{ symbol: string }>();
   const setSymbol = useAppStore((state) => state.setSymbol);
+  const selectedSymbol = useAppStore((state) => state.selectedSymbol);
 
   const symbol = cleanStockSymbol(params?.symbol ?? '');
   const [activeTab, setActiveTab] = useState<Tab>('kline');
@@ -95,14 +125,18 @@ export default function StockDetailPage() {
   const [indicator2, setIndicator2] = useState<IndicatorType>('KD');
 
   useEffect(() => {
-    if (symbol) setSymbol(symbol);
-  }, [setSymbol, symbol]);
+    if (!symbol) return;
+    if (symbol !== selectedSymbol) {
+      setSymbol(symbol);
+    }
+  }, [symbol, selectedSymbol, setSymbol]);
+
+  const liveSymbols = useMemo(() => (symbol ? [symbol] : []), [symbol]);
 
   // ── Data ───────────────────────────────────────────────────────────────────
-  const { data: marketData, isLoading: marketLoading, isError: marketError, refetch: refetchMarket } =
-    useHistoricalData(symbol, 400);
-  const { data: technicalData, isLoading: technicalLoading } = useTechnicalIndicators(symbol, !!symbol);
-  const { quotesByStockId, lastHeartbeat } = useLiveQuotes(symbol ? [symbol] : []);
+  const { data: marketData, isError: marketError, refetch: refetchMarket } = useHistoricalData(symbol, 400);
+  const { data: technicalData } = useTechnicalIndicators(symbol, !!symbol);
+  const { quotesByStockId, lastHeartbeat } = useLiveQuotes(liveSymbols);
   const { connectionState: tapeState, stockTicks, latestStockTick } = useStockTape(symbol);
 
   // ── Derived ────────────────────────────────────────────────────────────────
@@ -219,10 +253,10 @@ export default function StockDetailPage() {
           </div>
         )}
 
-        {/* 流水成交 筆數 */}
-        {activeTab === 'tape' && (
+        {/* 逐筆明細 筆數（最多保留 50 筆） */}
+        {activeTab === 'ticks' && (
           <div className="ml-auto flex items-center px-4 text-[11px] text-gray-500 font-mono">
-            {stockTicks.length} 筆
+            最新 {stockTicks.length} 筆（虛擬捲動）
           </div>
         )}
       </div>
@@ -261,60 +295,34 @@ export default function StockDetailPage() {
           )}
         </div>
 
-        {/* ── Tab: 流水成交 ─────────────────────────────────────────────────── */}
-        <div className={`h-full overflow-y-auto custom-scrollbar ${activeTab === 'tape' ? 'block' : 'hidden'}`}>
+        {/* ── Tab: 逐筆明細（單一標的 + 虛擬捲動，最多 50 筆） ───────────────────── */}
+        <div className={`h-full min-h-0 flex flex-col ${activeTab === 'ticks' ? 'flex' : 'hidden'}`}>
           {stockTicks.length === 0 ? (
             <div className="flex items-center justify-center h-full flex-col gap-3 text-gray-600">
-              <BarChart3 size={32} className="opacity-40" />
-              <p className="text-sm">等待逐筆成交資料…</p>
+              <TableProperties size={32} className="opacity-40" />
+              <p className="text-sm">等待 {symbol} 逐筆成交…</p>
+              <p className="text-xs text-gray-600 max-w-md text-center">
+                僅訂閱目前個股代號，與全方位流水報價使用相同後端通道；畫面最多保留 50 筆並以虛擬列表渲染。
+              </p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[#0A0F1E] z-10 border-b border-gray-800">
-                <tr className="text-[11px] uppercase tracking-wider text-gray-500">
-                  <th className="py-3 px-5 text-left font-semibold">時間</th>
-                  <th className="py-3 px-5 text-right font-semibold">成交價</th>
-                  <th className="py-3 px-5 text-right font-semibold">漲跌幅</th>
-                  <th className="py-3 px-5 text-right font-semibold">單量 (張)</th>
-                  <th className="py-3 px-5 text-center font-semibold">方向</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800/60">
-                {stockTicks.map((tick, idx) => {
-                  const isOuter = tick.tick_dir === 'OUTER';
-                  const isInner = tick.tick_dir === 'INNER';
-                  const priceAccent = isOuter ? 'text-red-400' : isInner ? 'text-green-400' : 'text-gray-300';
-                  const dirLabel   = isOuter ? '外盤' : isInner ? '內盤' : '—';
-                  const dirBadge   = isOuter
-                    ? 'bg-red-900/30 text-red-400 border-red-800/30'
-                    : isInner
-                      ? 'bg-green-900/30 text-green-400 border-green-800/30'
-                      : 'bg-gray-800/30 text-gray-500 border-gray-700/30';
-                  return (
-                    <tr
-                      key={`${tick.ts}-${tick.price}-${tick.volume}-${idx}`}
-                      className="hover:bg-white/[0.025] transition-colors"
-                    >
-                      <td className="py-2.5 px-5 font-mono text-gray-400 text-xs">{tick.ts}</td>
-                      <td className={`py-2.5 px-5 text-right font-mono font-bold ${priceAccent}`}>
-                        {tick.price.toFixed(2)}
-                      </td>
-                      <td className={`py-2.5 px-5 text-right font-mono text-xs ${tick.pct_chg >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                        {tick.pct_chg > 0 ? '+' : ''}{tick.pct_chg.toFixed(2)}%
-                      </td>
-                      <td className="py-2.5 px-5 text-right font-mono text-gray-400 text-xs">
-                        {tick.volume.toLocaleString()}
-                      </td>
-                      <td className="py-2.5 px-5 text-center">
-                        <span className={`inline-block text-[10px] font-bold border rounded px-2 py-0.5 ${dirBadge}`}>
-                          {dirLabel}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div className="flex flex-col flex-1 min-h-0 border-t border-gray-800/60">
+              <div className="shrink-0 flex text-[11px] uppercase tracking-wider text-gray-500 font-semibold border-b border-gray-800 bg-[#0A0F1E] px-4 py-2">
+                <span className="w-[88px]">時間</span>
+                <span className="flex-1 text-right">成交價</span>
+                <span className="w-[88px] text-right">漲跌幅</span>
+                <span className="w-[72px] text-right">量(張)</span>
+                <span className="w-[72px] text-right">方向</span>
+              </div>
+              <div className="flex-1 min-h-0">
+                <Virtuoso
+                  data={stockTicks}
+                  style={{ height: '100%' }}
+                  defaultItemHeight={40}
+                  itemContent={(_index, tick) => <TapeRow tick={tick} />}
+                />
+              </div>
+            </div>
           )}
         </div>
       </div>

@@ -156,7 +156,8 @@ async def scan_swing_wanderer(
 
     background_tasks.add_task(_maybe_warm_scanner)
     try:
-        results = _strip_private(get_last_signals_from_db("wanderer", limit=500))
+        raw_w = get_last_signals_from_db("wanderer", limit=500)
+        results = _strip_private(_finalize_wanderer_results(raw_w))
         if results:
             StaticCache.set(key, results, ttl=TTL_12H)
         response.headers["X-Cache"] = "MISS"

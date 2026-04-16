@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from backend.db import queries as _db_queries
+from backend.engines.engine_disposition import refresh_disposition_openapi_best_effort
 
 
 def _to_date(val) -> Optional[date]:
@@ -87,6 +88,7 @@ def enrich_scan_rows_disposition(rows: List[dict]) -> None:
     """
     if not rows:
         return
+    refresh_disposition_openapi_best_effort(force=False)
     dated: List[Tuple[dict, str, date]] = []
     for r in rows:
         if "處置狀態" not in r:

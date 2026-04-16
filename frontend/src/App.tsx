@@ -6,6 +6,7 @@ import { useBackendSidecar } from './hooks/useBackendSidecar';
 
 // Lazy-load pages
 const TaiexDynamicsPage   = lazy(() => import('./app/taiex-dynamics/page'));
+const AllAroundFeedPage   = lazy(() => import('./app/all-around/page'));
 const CapitalFlowPage     = lazy(() => import('./app/capital-flow/page'));
 const LongSelectionPage   = lazy(() => import('./app/long-selection/page'));
 const ShortSelectionPage  = lazy(() => import('./app/short-selection/page'));
@@ -46,6 +47,7 @@ function AppRoutes() {
 
           {/* 主要頁面 */}
           <Route path="/taiex-dynamics"  element={<TaiexDynamicsPage />} />
+          <Route path="/all-around"      element={<AllAroundFeedPage />} />
           <Route path="/capital-flow"    element={<CapitalFlowPage />} />
           <Route path="/long-selection"  element={<LongSelectionPage />} />
           <Route path="/short-selection" element={<ShortSelectionPage />} />
@@ -66,7 +68,6 @@ function AppRoutes() {
           <Route path="/stock/:symbol"   element={<StockDetailPage />} />
 
           {/* 舊路徑永久重導向（取代 next.config.ts redirects） */}
-          <Route path="/all-around"      element={<Navigate to="/taiex-dynamics"  replace />} />
           <Route path="/heatmap"         element={<Navigate to="/capital-flow"    replace />} />
           <Route path="/swing-long"      element={<Navigate to="/long-selection"  replace />} />
           <Route path="/swing-short"     element={<Navigate to="/short-selection" replace />} />

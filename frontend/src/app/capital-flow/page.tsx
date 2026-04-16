@@ -10,7 +10,10 @@ type ViewLevel = 'macro' | 'micro';
 
 const VIEW_LABELS: Record<ViewLevel, { label: string; desc: string }> = {
     macro: { label: '板塊', desc: '依主要產業分類聚合板塊' },
-    micro: { label: '族群', desc: '依題材聚合（可對應低軌衛星、CPO 等）' },
+    micro: {
+        label: '族群',
+        desc: '依題材聚合；同一檔可設多個題材（JSON 陣列或「、」），各區塊各列一次以利看資金流向',
+    },
 };
 
 /** 板塊聚合列 */
@@ -104,6 +107,20 @@ function sectorForView(s: HeatmapStock, view: ViewLevel): string {
     return t.length ? t : '（未分類）';
 }
 
+/** 族群視野：每檔依 micros 拆成多筆（每筆 micro 為該區塊標籤），板塊成交會重複計入同一檔 */
+function expandStocksForMicroView(stocks: HeatmapStock[]): HeatmapStock[] {
+    const out: HeatmapStock[] = [];
+    for (const s of stocks) {
+        const raw = s.micros && s.micros.length > 0 ? s.micros : [s.micro];
+        const keys = [...new Set(raw.map((k) => k.trim()).filter(Boolean))];
+        const slots = keys.length ? keys : ['（未分類）'];
+        for (const micro of slots) {
+            out.push({ ...s, micro });
+        }
+    }
+    return out;
+}
+
 function buildSectorBlocks(stocks: HeatmapStock[], viewLevel: ViewLevel): SectorBlock[] {
     const map = new Map<string, HeatmapStock[]>();
     for (const s of stocks) {
@@ -166,9 +183,14 @@ export default function CapitalFlowPage() {
 
     const rawStocks = data?.stocks ?? [];
 
-    const sectorBlocks = useMemo(
-        () => buildSectorBlocks(rawStocks, viewLevel),
+    const stocksForBlocks = useMemo(
+        () => (viewLevel === 'micro' ? expandStocksForMicroView(rawStocks) : rawStocks),
         [rawStocks, viewLevel]
+    );
+
+    const sectorBlocks = useMemo(
+        () => buildSectorBlocks(stocksForBlocks, viewLevel),
+        [stocksForBlocks, viewLevel]
     );
 
     const sortedBlocks = useMemo(() => {
@@ -300,6 +322,13 @@ export default function CapitalFlowPage() {
                         </h2>
                         <p className="text-gray-400 mt-2 ml-4">
                             板塊聚合：點列展開成分股子表（可欄位排序）；資料與列表同源、無額外請求。
+                            {viewLevel === 'micro' &&
+                                data?.theme_micro_ticker_count != null &&
+                                data.theme_micro_ticker_count > 0 && (
+                                    <span className="text-gray-500 ml-2">
+                                        題材表涵蓋約 {data.theme_micro_ticker_count} 檔（見專案 theme.json）；其餘仍依產業／內建對照。
+                                    </span>
+                                )}
                             {data?.date && (
                                 <span className="text-gray-500 ml-2">資料日期: {data.date}</span>
                             )}
@@ -602,7 +631,11 @@ export default function CapitalFlowPage() {
                                                                                     s.change_pct == null
                                                                                         ? s.change_pct_basis === 'unreliable'
                                                                                             ? '前後收盤價尺度不一致或資料異常，已不列入板塊平均（如面額變更、除權未還原等）'
-                                                                                            : '無法計算漲跌幅'
+                                                                                            : s.change_pct_basis === 'no_volume'
+                                                                                              ? '當日成交量為 0，不計漲跌幅（避免無成交卻帶價的假漲跌）'
+                                                                                              : s.change_pct_basis === 'no_reference'
+                                                                                                ? '找不到有效前收（上一有量日），不計漲跌幅'
+                                                                                                : '無法計算漲跌幅'
                                                                                         : s.change_pct_basis === 'intraday'
                                                                                           ? '與前收相比異常，已改採當日開盤→收盤漲跌幅'
                                                                                           : undefined

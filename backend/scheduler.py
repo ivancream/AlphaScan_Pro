@@ -99,8 +99,23 @@ async def job_scanner() -> None:
     _log.info("[Scheduler] scanner: starting")
     loop = asyncio.get_event_loop()
     try:
-        from backend.engines.engine_intraday_scanner import run_scan
+        from backend.engines.engine_intraday_scanner import run_scan, pop_pending_scan_notify
+        from backend.engines import notifier as _notifier
+
         await loop.run_in_executor(None, run_scan)
+
+        pending = pop_pending_scan_notify()
+        if pending:
+            try:
+                await _notifier.notify_scan_results(
+                    results_long=pending["long"],
+                    results_short=pending["short"],
+                    scan_id=pending["scan_id"],
+                    scan_time=pending["scan_time"],
+                    only_new_triggers=pending.get("only_new_triggers", False),
+                )
+            except Exception as notify_exc:
+                _log.error("[Scheduler] scanner Discord notify failed: %s", notify_exc)
     except Exception as exc:
         _log.error("[Scheduler] scanner failed: %s", exc)
 

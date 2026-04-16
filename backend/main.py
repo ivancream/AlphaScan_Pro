@@ -21,7 +21,7 @@ from backend.db.connection import init_all as _init_all_dbs, close_duckdb
 from backend.scheduler import start_scheduler, stop_scheduler
 
 from backend.api.v1 import (
-    market_data, sentiment, global_market, fundamental,
+    market_data, market_brief, sentiment, global_market, fundamental,
     technical, swing, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
     heatmap, live_quotes, all_around, intraday_scanner, notifier as notifier_api,
@@ -125,6 +125,7 @@ async def shutdown_engines():
 
 # 註冊 API 路由 (Controllers)
 app.include_router(market_data.router, tags=["Market Data"])
+app.include_router(market_brief.router, tags=["Market Brief"])
 app.include_router(sentiment.router, tags=["Qualitative Analysis"])
 app.include_router(global_market.router, tags=["Global Market"])
 app.include_router(fundamental.router, tags=["Fundamental Analysis"])

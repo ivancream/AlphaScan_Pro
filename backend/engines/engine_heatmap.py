@@ -13,9 +13,12 @@
   資金流向 **解耦**；若改從 LiveQuote 拼全市場，會缺檔且與排程寫庫重複。
 
 1. 行情：DuckDB daily_prices 最新交易日（成交額 = close × volume 股數）。
-   漲跌幅若與前收相比異常（>45%），改試當日開→收；仍異常則 change_pct=null，不列入板塊加權平均（避免面額變更等拉歪）。
+   前收優先採「上一個 volume>0 的交易日」收盤，避免停牌／無量日沿用錯誤參考價與前一日無成交列造成假漲跌。
+   漲跌幅與前收相比若超過合理現股區間（>15.5%），改試當日開→收；仍異常或開收幾乎持平但與前收矛盾則 change_pct=null。
+   當日成交量為 0：不計漲跌幅（null），避免快照價與歷史前收混算。
 2. 大／中視野：stock_sectors（證交所 CSV 匯入）+ twstock 後備
-3. 小視野：stock_sectors.micro、data/stock_themes.json、內建 theme_data 後備
+3. 小視野：stock_sectors.micro、theme.json（題材→代號反轉）、data/stock_themes.json（代號覆寫）、內建 theme_data 後備。
+   題材可多個：JSON 陣列或 DB 以「、」串接；API 回傳 micros，前端族群視野可重複列示。
 """
 
 from __future__ import annotations
@@ -24,15 +27,22 @@ from typing import Any, Dict, Optional
 
 from backend.db.connection import DUCKDB_PATH, duck_read
 from backend.engines.theme_data import STATIC_SECTOR_MAP
-from backend.engines.theme_loader import load_json_theme_micros
+from backend.engines.theme_loader import load_json_theme_micro_lists
 
 # 相容舊 import
 __all__ = ["get_heatmap_data", "STATIC_SECTOR_MAP"]
 
-# 與前收相比之漲跌幅若超過此值，多半為面額變更／除權未還原／跨尺度混用，改試當日開收比。
-_RAW_CHANGE_OUTLIER_PCT = 45.0
-# 當日開→收漲跌幅合理上限（一般現股漲跌停 ±10%，略放寬含盤中誤差與部分商品）。
-_INTRADAY_SANITY_MAX_PCT = 15.0
+def _stock_id_str(raw: Any) -> str:
+    """DuckDB / twstock 混用時，代號一律正規成純字串，否則 theme_lists 等 dict 會對不到鍵。"""
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+# 現股單日漲跌停約 ±10%，略放寬；超過則改試開→收或視為不可靠（避免 900% 類假漲跌）。
+_RAW_CHANGE_OUTLIER_PCT = 15.5
+# 當日開→收漲跌幅合理上限（與漲跌停同量級）。
+_INTRADAY_SANITY_MAX_PCT = 15.5
 
 
 def _heatmap_change_pct(
@@ -46,7 +56,7 @@ def _heatmap_change_pct(
     備註 'intraday' 表示因前後尺度異常改採「當日開盤→收盤」漲跌幅。
     """
     if prev_close is None or prev_close <= 0:
-        return 0.0, None
+        return None, "no_reference"
 
     raw = (close - prev_close) / prev_close * 100.0
 
@@ -57,6 +67,9 @@ def _heatmap_change_pct(
         intraday = (close - open_px) / open_px * 100.0
         if abs(intraday) <= _INTRADAY_SANITY_MAX_PCT:
             return round(intraday, 2), "intraday"
+        # 與前收差異極大，但開→收幾乎沒動：多為前收參考錯或報價快照錯位，不顯示假漲跌
+        if abs(intraday) < 0.35 and abs(raw) > _RAW_CHANGE_OUTLIER_PCT * 2:
+            return None, "unreliable"
 
     return None, "unreliable"
 
@@ -81,12 +94,52 @@ def _get_fallback_tags(macro: str) -> tuple[str, str]:
     return (macro, macro)
 
 
+def _split_sector_micro_to_tags(raw: str) -> list[str]:
+    """stock_sectors.micro：單一標籤，或以「、」分隔的多題材（與 refresh 寫入一致）。"""
+    s = raw.strip()
+    if not s:
+        return []
+    if "、" in s:
+        parts = [p.strip() for p in s.split("、")]
+        return [p for p in parts if p] or [s]
+    return [s]
+
+
+def _dedupe_tags_preserve(tags: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _resolve_micros(
+    stock_id: str,
+    sector: Optional[dict[str, Any]],
+    theme_lists: dict[str, list[str]],
+    meso: str,
+) -> list[str]:
+    if stock_id in theme_lists:
+        tags = theme_lists[stock_id]
+        if tags:
+            return _dedupe_tags_preserve(tags)
+    if sector and (sector.get("micro") or "").strip():
+        tags = _split_sector_micro_to_tags(str(sector["micro"]))
+        if tags:
+            return _dedupe_tags_preserve(tags)
+    if stock_id in STATIC_SECTOR_MAP:
+        return [STATIC_SECTOR_MAP[stock_id][1]]
+    return [meso]
+
+
 def _resolve_labels(
     stock_id: str,
     sector: Optional[dict[str, Any]],
     tw_group: Optional[str],
-    theme_json: dict[str, str],
-) -> tuple[str, str, str]:
+    theme_lists: dict[str, list[str]],
+) -> tuple[str, str, list[str]]:
     tw_group = (tw_group or "").strip() or None
 
     if sector and (sector.get("macro") or "").strip():
@@ -103,16 +156,8 @@ def _resolve_labels(
     else:
         meso, _ = _get_fallback_tags(macro)
 
-    if stock_id in theme_json:
-        micro = theme_json[stock_id]
-    elif sector and (sector.get("micro") or "").strip():
-        micro = str(sector["micro"]).strip()
-    elif stock_id in STATIC_SECTOR_MAP:
-        micro = STATIC_SECTOR_MAP[stock_id][1]
-    else:
-        micro = meso
-
-    return macro, meso, micro
+    micros = _resolve_micros(stock_id, sector, theme_lists, meso)
+    return macro, meso, micros
 
 
 def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
@@ -133,7 +178,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
     except Exception:
         tw_codes = {}
 
-    theme_json = load_json_theme_micros()
+    theme_lists = load_json_theme_micro_lists()
 
     with duck_read() as conn:
         latest_date_row = conn.execute(
@@ -147,6 +192,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
                 "as_of_date": None,
                 "price_source": None,
                 "ingest_path": None,
+                "theme_micro_ticker_count": len(theme_lists),
             }
         latest_date = latest_date_row[0]
 
@@ -167,16 +213,34 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
                 "SELECT stock_id, close FROM daily_prices WHERE date::VARCHAR = ?",
                 [prev_date],
             ).fetchall()
-            prev_close_map = {r[0]: r[1] for r in prev_rows}
+            prev_close_map = {_stock_id_str(r[0]): r[1] for r in prev_rows}
+
+        # 上一個「有成交量」交易日的收盤（股數 > 0），優先於日曆前一日收盤
+        prev_traded_rows = conn.execute(
+            """
+            SELECT dp.stock_id, dp.close
+            FROM daily_prices dp
+            INNER JOIN (
+                SELECT stock_id, MAX(date) AS md
+                FROM daily_prices
+                WHERE date < ?::DATE AND COALESCE(volume, 0) > 0
+                GROUP BY stock_id
+            ) AS lst ON dp.stock_id = lst.stock_id AND dp.date = lst.md
+            """,
+            [latest_date],
+        ).fetchall()
+        prev_traded_close_map: dict[str, float] = {
+            _stock_id_str(r[0]): float(r[1]) for r in prev_traded_rows if r[1] is not None
+        }
 
         names_rows = conn.execute("SELECT stock_id, name FROM stock_info").fetchall()
-        stock_names = {r[0]: r[1] for r in names_rows}
+        stock_names = {_stock_id_str(r[0]): r[1] for r in names_rows}
 
         sector_rows = conn.execute(
             "SELECT stock_id, macro, meso, micro, industry_raw FROM stock_sectors"
         ).fetchall()
         sector_map = {
-            r[0]: {
+            _stock_id_str(r[0]): {
                 "macro": r[1],
                 "meso": r[2],
                 "micro": r[3],
@@ -186,23 +250,30 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
         }
 
     stocks = []
-    for stock_id, close, volume, open_price in today_rows:
-        if close is None or close <= 0:
+    for raw_sid, close, volume, open_price in today_rows:
+        stock_id = _stock_id_str(raw_sid)
+        if not stock_id or close is None or close <= 0:
             continue
 
         tw = tw_codes.get(stock_id) if stock_id in tw_codes else None
         tw_group = getattr(tw, "group", None) if tw else None
 
         sector = sector_map.get(stock_id)
-        macro, meso, micro = _resolve_labels(
-            stock_id, sector, tw_group, theme_json
+        macro, meso, micros = _resolve_labels(
+            stock_id, sector, tw_group, theme_lists
         )
 
         name = stock_names.get(stock_id, stock_id)
 
-        prev_close = prev_close_map.get(stock_id)
+        vol = int(volume or 0)
+        prev_close = prev_traded_close_map.get(stock_id) or prev_close_map.get(stock_id)
         open_f = float(open_price) if open_price is not None else None
-        change_pct, cp_note = _heatmap_change_pct(prev_close, float(close), open_f)
+
+        if vol <= 0:
+            change_pct: Optional[float] = None
+            cp_note = "no_volume"
+        else:
+            change_pct, cp_note = _heatmap_change_pct(prev_close, float(close), open_f)
 
         turnover = int(close * volume) if volume else 0
 
@@ -211,7 +282,8 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
             "name": name,
             "macro": macro,
             "meso": meso,
-            "micro": micro,
+            "micro": micros[0],
+            "micros": micros,
             "close": round(close, 2),
             "change_pct": change_pct,
             "turnover": turnover,
@@ -232,5 +304,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
         # 供前端／除錯確認：價量來自庫表，非即時逐檔 API
         "price_source": "duckdb_daily_prices",
         "ingest_path": "scheduler_intraday_batch",
+        # theme.json + stock_themes 合併後有設定題材的代號數（其餘族群列仍可能為產業 meso）
+        "theme_micro_ticker_count": len(theme_lists),
         "stocks": stocks,
     }

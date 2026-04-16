@@ -34,7 +34,7 @@ import uuid
 import zoneinfo
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -70,6 +70,71 @@ _SCAN_CACHE: Dict = {
 
 _scanner_task: Optional[asyncio.Task] = None
 _scan_lock = threading.Lock()
+
+# ── 狀態式掃描：記住「上一次成功掃描」的多/空命中代號，供 Discord 只推「新觸發」──
+# None = 尚無任何一次成功掃描（第一次成功掃描僅建立基準線，不發通知）
+_prev_hit_ids_long: Optional[Set[str]] = None
+_prev_hit_ids_short: Optional[Set[str]] = None
+
+
+def _row_stock_id(row: Dict) -> str:
+    return str(row.get("代號") or row.get("stock_id") or "").strip()
+
+
+def _only_new_trigger_notify() -> bool:
+    """true：只對本次新進榜的標的發 Discord；false：每次掃描推播完整清單（舊行為）。"""
+    return os.getenv("DISCORD_NOTIFY_ONLY_NEW_TRIGGERS", "true").lower() in ("1", "true", "yes")
+
+
+def pop_pending_scan_notify() -> Optional[Dict]:
+    """
+    由 APScheduler / 掃描迴圈在 _run_scan() 結束後呼叫，取出並清除待推播的 Discord 負載。
+    若本輪無需推播則回傳 None。
+    """
+    return _SCAN_CACHE.pop("_pending_notify", None)
+
+
+def get_scan_notify_state() -> Dict:
+    """除錯用：多/空上一輪命中集合是否已建立基準線。"""
+    return {
+        "only_new_triggers": _only_new_trigger_notify(),
+        "baseline_seeded_long":  _prev_hit_ids_long is not None,
+        "baseline_seeded_short": _prev_hit_ids_short is not None,
+        "prev_count_long":  len(_prev_hit_ids_long) if _prev_hit_ids_long is not None else None,
+        "prev_count_short": len(_prev_hit_ids_short) if _prev_hit_ids_short is not None else None,
+    }
+
+
+def _compute_new_triggers_vs_prev(
+    results_long: List[Dict],
+    results_short: List[Dict],
+) -> Tuple[List[Dict], List[Dict], bool]:
+    """
+    依上一輪命中集合計算「新觸發」列；並回傳本輪是否應視為「僅新觸發」模式（供 Embed 文案）。
+    第一次成功掃描：回傳 ([], [])，並將本輪全集寫入 prev。
+    """
+    global _prev_hit_ids_long, _prev_hit_ids_short
+
+    curr_long = {_row_stock_id(r) for r in results_long if _row_stock_id(r)}
+    curr_short = {_row_stock_id(r) for r in results_short if _row_stock_id(r)}
+
+    use_diff = _only_new_trigger_notify()
+
+    if not use_diff:
+        _prev_hit_ids_long = curr_long
+        _prev_hit_ids_short = curr_short
+        return results_long, results_short, False
+
+    new_long: List[Dict] = []
+    new_short: List[Dict] = []
+    if _prev_hit_ids_long is not None:
+        new_long = [r for r in results_long if _row_stock_id(r) not in _prev_hit_ids_long]
+    if _prev_hit_ids_short is not None:
+        new_short = [r for r in results_short if _row_stock_id(r) not in _prev_hit_ids_short]
+
+    _prev_hit_ids_long = curr_long
+    _prev_hit_ids_short = curr_short
+    return new_long, new_short, True
 
 # ── 輔助函式 ─────────────────────────────────────────────────────────────────
 
@@ -405,6 +470,13 @@ def _run_scan() -> None:
         db_elapsed = time.time() - t_db
         print(f"[Scanner #{scan_id}] 批次讀取 {len(history_cache)} 檔歷史K線 ({db_elapsed:.1f}s)")
 
+        try:
+            from backend.engines.engine_disposition import refresh_disposition_openapi_best_effort
+
+            refresh_disposition_openapi_best_effort(force=True)
+        except Exception as disp_exc:  # noqa: BLE001
+            print(f"[Scanner #{scan_id}] 處置清單同步失敗（沿用 DuckDB）: {disp_exc}")
+
         disp_event_by_sid = compute_event_disposition_map(history_cache)
 
         # ── 4. 取全局最新日期，過濾過時股票 ─────────────────────────────────
@@ -500,13 +572,34 @@ def _run_scan() -> None:
         })
         print(f"[Scanner #{scan_id}] {msg}")
 
-        # ── Discord 通知（只在 DISCORD_NOTIFY_ON_SCAN=true 時觸發） ──────────
-        _SCAN_CACHE["_pending_notify"] = {
-            "scan_id":   scan_id,
-            "scan_time": scan_time,
-            "long":      results_long,
-            "short":     results_short,
-        }
+        # ── Discord：狀態比對後只佇列「新觸發」（避免每 30 分鐘重複洗版）──────
+        new_long, new_short, only_new_triggers = _compute_new_triggers_vs_prev(
+            results_long, results_short
+        )
+        try:
+            from . import notifier as _nf
+            _notify_on = _nf.is_notify_enabled()
+        except Exception:
+            _notify_on = False
+
+        if _notify_on:
+            if only_new_triggers:
+                if new_long or new_short:
+                    _SCAN_CACHE["_pending_notify"] = {
+                        "scan_id":             scan_id,
+                        "scan_time":           scan_time,
+                        "long":                new_long,
+                        "short":               new_short,
+                        "only_new_triggers":   True,
+                    }
+            else:
+                _SCAN_CACHE["_pending_notify"] = {
+                    "scan_id":             scan_id,
+                    "scan_time":           scan_time,
+                    "long":                results_long,
+                    "short":               results_short,
+                    "only_new_triggers":   False,
+                }
 
     except Exception as exc:
         _SCAN_CACHE.update({
@@ -540,7 +633,7 @@ async def _scanner_loop() -> None:
                 await loop.run_in_executor(None, _run_scan)
 
                 # ── 掃描完成後，嘗試推送 Discord 通知（非同步，失敗不影響排程） ──
-                pending = _SCAN_CACHE.pop("_pending_notify", None)
+                pending = pop_pending_scan_notify()
                 if pending:
                     try:
                         n = _get_notifier()
@@ -549,6 +642,7 @@ async def _scanner_loop() -> None:
                             results_short = pending["short"],
                             scan_id       = pending["scan_id"],
                             scan_time     = pending["scan_time"],
+                            only_new_triggers=pending.get("only_new_triggers", False),
                         )
                     except Exception as notify_exc:
                         print(f"[Scanner Notifier] 推送失敗（不影響掃描）: {notify_exc}")
@@ -575,7 +669,7 @@ def start_scanner() -> None:
 
 def get_scan_status() -> Dict:
     """回傳目前掃描器狀態（不含結果清單）。"""
-    return {
+    out = {
         "status":      _SCAN_CACHE["status"],
         "message":     _SCAN_CACHE["message"],
         "last_run":    _SCAN_CACHE["last_run"],
@@ -588,6 +682,8 @@ def get_scan_status() -> Dict:
         },
         "is_market_hours": _is_market_hours(),
     }
+    out["discord_scan_state"] = get_scan_notify_state()
+    return out
 
 
 def get_scan_results(strategy: str = "long") -> List[Dict]:

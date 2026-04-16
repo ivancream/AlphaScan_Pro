@@ -25,8 +25,8 @@ import urllib.request
 
 from backend.db import writer
 from backend.db.writer import log_update_error
-from backend.engines.theme_data import STATIC_SECTOR_MAP
-from backend.engines.theme_loader import THEMES_JSON, load_json_theme_micros
+from backend.db.sector_micro_sync import apply_theme_json_to_stock_sectors
+from backend.engines.theme_loader import THEMES_JSON, load_json_theme_micro_lists
 from backend.scripts.industry_codes import industry_name
 
 TSE_CSV = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
@@ -56,14 +56,12 @@ def _norm_keys(row: dict) -> dict[str, str]:
     return out
 
 
-def _merge_theme_micros() -> dict[str, str]:
-    """JSON 覆寫 + 內建 STATIC 第二欄（小視野）。"""
-    j = load_json_theme_micros()
-    merged: dict[str, str] = {}
-    for sid, pair in STATIC_SECTOR_MAP.items():
-        merged[sid] = pair[1]
-    merged.update(j)
-    return merged
+def _tags_to_db_micro(tags: list[str]) -> str | None:
+    if not tags:
+        return None
+    if len(tags) == 1:
+        return tags[0]
+    return "、".join(tags)
 
 
 def run_stock_sectors_refresh() -> int:
@@ -75,7 +73,7 @@ def run_stock_sectors_refresh() -> int:
     except Exception:
         tw_codes = {}
 
-    theme_micros = _merge_theme_micros()
+    theme_lists = load_json_theme_micro_lists()
 
     all_rows: list[tuple[str, str, str, str | None, str]] = []
     seen: set[str] = set()
@@ -102,9 +100,8 @@ def run_stock_sectors_refresh() -> int:
             macro = name_cn
             meso = tw_group if tw_group else macro
 
-            micro = theme_micros.get(sid)
-            if not micro:
-                micro = None
+            tags = theme_lists.get(sid)
+            micro = _tags_to_db_micro(tags) if tags else None
 
             if sid in seen:
                 continue
@@ -118,6 +115,11 @@ def run_stock_sectors_refresh() -> int:
 
     n = writer.upsert_stock_sectors(all_rows)
     print(f"[StockSectors] Upserted {n} rows (TWSE industry + themes).")
+    t_n, t_ins = apply_theme_json_to_stock_sectors()
+    print(
+        f"[StockSectors] Theme micro sync: {t_n} rows "
+        f"(theme-only inserts: {t_ins}; theme.json + stock_themes.json → micro)."
+    )
     return n
 
 

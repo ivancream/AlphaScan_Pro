@@ -16,8 +16,13 @@ from datetime import date, timedelta
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 import warnings
+import time
 
 warnings.filterwarnings("ignore")
+
+# 盤中浪子／掃描依賴 disposition_events；若僅依 15:05 排程更新，日間 DB 常為空。
+_LAST_DISP_OPENAPI_FETCH_MONO: float = 0.0
+_DISP_OPENAPI_MIN_INTERVAL_SEC: float = 300.0
 
 # ──────────────────────────────────────────────────────
 # 設定
@@ -81,7 +86,7 @@ def _mins_display_to_int(mins_label: str, measures: str = "") -> int:
         prefix = t[:-1]
         if prefix.isdigit():
             return int(prefix)
-    mapping = {"5分": 5, "10分": 10, "20分": 20}
+    mapping = {"5分": 5, "10分": 10, "20分": 20, "45分": 45}
     if t in mapping:
         return mapping[t]
     text = measures or ""
@@ -225,6 +230,24 @@ def fetch_current_dispositions_and_save() -> List[Dict]:
     return all_items
 
 
+def refresh_disposition_openapi_best_effort(*, force: bool = False) -> None:
+    """
+    從 TWSE／TPEx OpenAPI 同步「當前處置」到 DuckDB。
+
+    - force=False：5 分鐘內不重複請求（供 enrich 等頻繁路徑）。
+    - force=True：每次必拉（例：全市場掃描前，確保撮合分鐘正確）。
+    """
+    global _LAST_DISP_OPENAPI_FETCH_MONO
+    now = time.monotonic()
+    if not force and (now - _LAST_DISP_OPENAPI_FETCH_MONO) < _DISP_OPENAPI_MIN_INTERVAL_SEC:
+        return
+    try:
+        fetch_current_dispositions_and_save()
+        _LAST_DISP_OPENAPI_FETCH_MONO = time.monotonic()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Disposition] refresh_disposition_openapi_best_effort: {exc}")
+
+
 def _parse_mins(text: str) -> str:
     if not text:
         return '未知'
@@ -234,6 +257,8 @@ def _parse_mins(text: str) -> str:
         return '10分'
     if '20分鐘' in text or '二十分鐘' in text or '20分' in text:
         return '20分'
+    if '45分鐘' in text or '四十五分鐘' in text or '45分' in text:
+        return '45分'
     match = re.search(r'每[^\d]*(\d+)[^\d]*分', text)
     if match:
         return match.group(1) + '分'

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   createChart,
   ColorType,
@@ -31,6 +31,22 @@ export function IntradayChart({ ticks, referencePrice }: Props) {
   const refLineRef = useRef<ReturnType<IChartApi['addSeries']> | null>(null);
 
   const seriesData = useMemo(() => ticksToSeriesData(ticks), [ticks]);
+
+  const rafRef = useRef<number | null>(null);
+  const pendingSeriesRef = useRef<ReturnType<typeof ticksToSeriesData> | null>(null);
+
+  const applySeriesThrottled = useCallback((next: ReturnType<typeof ticksToSeriesData>) => {
+    pendingSeriesRef.current = next;
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const payload = pendingSeriesRef.current;
+      pendingSeriesRef.current = null;
+      if (!seriesRef.current || !payload?.length) return;
+      seriesRef.current.setData(payload as Parameters<NonNullable<typeof seriesRef.current>['setData']>[0]);
+      chartRef.current?.timeScale().fitContent();
+    });
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -77,6 +93,10 @@ export function IntradayChart({ ticks, referencePrice }: Props) {
     ro.observe(containerRef.current);
 
     return () => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -86,10 +106,9 @@ export function IntradayChart({ ticks, referencePrice }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!seriesRef.current || seriesData.length === 0) return;
-    seriesRef.current.setData(seriesData as Parameters<typeof seriesRef.current.setData>[0]);
-    chartRef.current?.timeScale().fitContent();
-  }, [seriesData]);
+    if (seriesData.length === 0) return;
+    applySeriesThrottled(seriesData);
+  }, [seriesData, applySeriesThrottled]);
 
   useEffect(() => {
     if (!seriesRef.current || referencePrice == null) return;

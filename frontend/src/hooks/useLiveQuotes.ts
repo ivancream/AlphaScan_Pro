@@ -7,6 +7,11 @@ type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
 const RECONNECT_MS = 2500;
 const THROTTLE_MS = 500;
 
+/**
+ * 即時報價 WebSocket。
+ * `symbols` 會帶在 query 上讓後端 `ensure_symbol`；連線時 snapshot 仍可能含引擎內其他標的。
+ * 若傳入非空 `symbols`，回傳的 `quotesByStockId` / `quoteList` 僅保留這些代號（其餘忽略）。
+ */
 export function useLiveQuotes(symbols?: string[]) {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
@@ -117,13 +122,27 @@ export function useLiveQuotes(symbols?: string[]) {
     };
   }, [symbolKey]);
 
-  const quoteList = useMemo(() => Object.values(quotes), [quotes]);
+  const filterSet = useMemo(() => {
+    if (!symbols?.length) return null;
+    return new Set(symbols.map((s) => String(s ?? '').trim().toUpperCase()).filter(Boolean));
+  }, [symbols]);
+
+  const quotesByStockId = useMemo(() => {
+    if (!filterSet) return quotes;
+    const out: Record<string, LiveQuote> = {};
+    for (const [k, v] of Object.entries(quotes)) {
+      if (filterSet.has(k)) out[k] = v;
+    }
+    return out;
+  }, [quotes, filterSet]);
+
+  const quoteList = useMemo(() => Object.values(quotesByStockId), [quotesByStockId]);
 
   return {
     connectionState,
     lastHeartbeat,
     error,
-    quotesByStockId: quotes,
+    quotesByStockId,
     quoteList,
   };
 }

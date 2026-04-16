@@ -15,14 +15,16 @@ export interface HeatmapStock {
     macro: string;
     meso: string;
     micro: string;
+    /** 小視野多題材；族群視野下同一檔可重複出現於各區塊 */
+    micros?: string[];
     close: number;
     /** 無法可靠計算時為 null（不列入板塊成交加權平均） */
     change_pct: number | null;
     turnover: number;
     volume: number;
     industry_raw?: string;
-    /** 後端：intraday = 改採當日開收；unreliable = 僅標記，change_pct 為 null */
-    change_pct_basis?: 'intraday' | 'unreliable' | string;
+    /** 後端：intraday / unreliable / no_volume / no_reference 等，change_pct 為 null 時見 basis */
+    change_pct_basis?: string;
 }
 
 export interface HeatmapData {
@@ -35,6 +37,8 @@ export interface HeatmapData {
     price_source?: string | null;
     /** scheduler_intraday_batch */
     ingest_path?: string | null;
+    /** theme.json + stock_themes 有設定題材的代號數 */
+    theme_micro_ticker_count?: number | null;
 }
 
 function isTaiwanMarketHours(): boolean {
@@ -68,7 +72,14 @@ export function useHeatmapData() {
         setError(null);
         try {
             const res = await fetch(`${API_V1_BASE}/heatmap/data`);
-            if (!res.ok) throw new Error(`API Error: ${res.status}`);
+            if (!res.ok) {
+                if (res.status === 502 || res.status === 503) {
+                    throw new Error(
+                        `無法連到後端（${res.status}）。請確認 FastAPI 已在 http://127.0.0.1:8000 執行（例如執行專案 start-dev.bat 或 uvicorn）。`
+                    );
+                }
+                throw new Error(`API Error: ${res.status}`);
+            }
             const json = await res.json();
             setData(json);
         } catch (e: unknown) {
