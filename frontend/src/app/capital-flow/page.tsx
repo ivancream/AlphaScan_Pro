@@ -12,7 +12,7 @@ const VIEW_LABELS: Record<ViewLevel, { label: string; desc: string }> = {
     macro: { label: '板塊', desc: '依主要產業分類聚合板塊' },
     micro: {
         label: '族群',
-        desc: '依題材聚合；同一檔可設多個題材（JSON 陣列或「、」），各區塊各列一次以利看資金流向',
+        desc: '依專案 theme.json 題材聚合；同一檔可屬多個題材鍵，各區塊各列一次；無題材者不列入此視野',
     },
 };
 
@@ -29,7 +29,14 @@ type SectorBlock = {
     flatCount: number;
 };
 
-type BlockSortKey = 'label' | 'turnover' | 'avg_change' | 'constituents' | 'up_count' | 'down_count';
+type BlockSortKey =
+    | 'label'
+    | 'turnover'
+    | 'turnover_share'
+    | 'avg_change'
+    | 'constituents'
+    | 'up_count'
+    | 'down_count';
 
 /** 板塊內成分股子表排序（僅前端，資料來自同一筆 heatmap API） */
 type ComponentSortKey = 'ticker' | 'name' | 'close' | 'change_pct' | 'turnover' | 'volume';
@@ -183,10 +190,31 @@ export default function CapitalFlowPage() {
 
     const rawStocks = data?.stocks ?? [];
 
-    const stocksForBlocks = useMemo(
-        () => (viewLevel === 'micro' ? expandStocksForMicroView(rawStocks) : rawStocks),
-        [rawStocks, viewLevel]
+    const stats = useMemo(() => {
+        if (!rawStocks.length) return null;
+        const totalTurnover = rawStocks.reduce((sum, s) => sum + s.turnover, 0);
+        const upCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct > 0).length;
+        const downCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct < 0).length;
+        const flatCount = rawStocks.length - upCount - downCount;
+        return { totalTurnover, upCount, downCount, flatCount, total: rawStocks.length };
+    }, [rawStocks]);
+
+    /** 大盤總成交金額（API 全市場成分各檔 turnover 加總；族群視野下作為占比分母） */
+    const marketTotalTurnover = stats?.totalTurnover ?? 0;
+
+    const blockTurnoverSharePct = useCallback(
+        (blockTurnover: number) => {
+            if (marketTotalTurnover <= 0) return null;
+            return (blockTurnover / marketTotalTurnover) * 100;
+        },
+        [marketTotalTurnover]
     );
+
+    const stocksForBlocks = useMemo(() => {
+        if (viewLevel !== 'micro') return rawStocks;
+        const themed = rawStocks.filter((s) => Array.isArray(s.micros) && s.micros.length > 0);
+        return expandStocksForMicroView(themed);
+    }, [rawStocks, viewLevel]);
 
     const sectorBlocks = useMemo(
         () => buildSectorBlocks(stocksForBlocks, viewLevel),
@@ -209,6 +237,13 @@ export default function CapitalFlowPage() {
                     va = a.totalTurnover;
                     vb = b.totalTurnover;
                     break;
+                case 'turnover_share': {
+                    const pa = marketTotalTurnover > 0 ? (a.totalTurnover / marketTotalTurnover) * 100 : 0;
+                    const pb = marketTotalTurnover > 0 ? (b.totalTurnover / marketTotalTurnover) * 100 : 0;
+                    va = pa;
+                    vb = pb;
+                    break;
+                }
                 case 'avg_change':
                     va = a.avgChangePct;
                     vb = b.avgChangePct;
@@ -236,7 +271,7 @@ export default function CapitalFlowPage() {
             return 0;
         });
         return list;
-    }, [sectorBlocks, blockSort]);
+    }, [sectorBlocks, blockSort, marketTotalTurnover]);
 
     const toggleBlock = useCallback((key: string) => {
         setExpandedKeys((prev) => {
@@ -301,15 +336,6 @@ export default function CapitalFlowPage() {
         },
         [setSymbol, navigate]
     );
-
-    const stats = useMemo(() => {
-        if (!rawStocks.length) return null;
-        const totalTurnover = rawStocks.reduce((sum, s) => sum + s.turnover, 0);
-        const upCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct > 0).length;
-        const downCount = rawStocks.filter((s) => s.change_pct != null && s.change_pct < 0).length;
-        const flatCount = rawStocks.length - upCount - downCount;
-        return { totalTurnover, upCount, downCount, flatCount, total: rawStocks.length };
-    }, [rawStocks]);
 
     return (
         <div className="p-6 space-y-6 animate-in fade-in duration-500 text-gray-200 h-full flex flex-col min-h-0">
@@ -458,6 +484,16 @@ export default function CapitalFlowPage() {
                                             {renderBlockSortIcon('turnover')}
                                         </span>
                                     </th>
+                                    <th
+                                        className="px-3 py-3 cursor-pointer hover:text-white text-right whitespace-nowrap"
+                                        onClick={() => handleBlockSort('turnover_share')}
+                                        title="該分類內各檔成交金額加總 ÷ 當日全市場成交金額加總（與上方總成交金額同口徑）。族群視野下同一檔可重複出現在多個題材，故各區塊占比加總可能大於 100%"
+                                    >
+                                        <span className="inline-flex items-center justify-end gap-1 w-full">
+                                            成交額占大盤%
+                                            {renderBlockSortIcon('turnover_share')}
+                                        </span>
+                                    </th>
                                     <th className="px-3 py-3 text-right text-gray-500 whitespace-nowrap">
                                         總成交量(張)
                                     </th>
@@ -520,6 +556,12 @@ export default function CapitalFlowPage() {
                                                 <td className="px-3 py-2.5 text-right font-mono text-orange-200/90">
                                                     {(block.totalTurnover / 100000000).toFixed(2)} 億
                                                 </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-amber-100/90">
+                                                    {(() => {
+                                                        const p = blockTurnoverSharePct(block.totalTurnover);
+                                                        return p == null ? '—' : `${p.toFixed(2)}%`;
+                                                    })()}
+                                                </td>
                                                 <td className="px-3 py-2.5 text-right font-mono text-gray-400">
                                                     {block.totalVolume.toLocaleString()}
                                                 </td>
@@ -532,7 +574,7 @@ export default function CapitalFlowPage() {
                                             </tr>
                                             {open && (
                                                 <tr className="bg-[#0E1117]/60">
-                                                    <td colSpan={7} className="p-0 border-b border-gray-800/80">
+                                                    <td colSpan={8} className="p-0 border-b border-gray-800/80">
                                                         <div className="border-l-2 border-orange-500/50 ml-3 pl-2 pr-2 py-2 overflow-x-auto">
                                                             <p className="text-[11px] text-gray-500 mb-2 pl-1">
                                                                 成分股穿透（與主表同一筆 API，依欄位即時排序）

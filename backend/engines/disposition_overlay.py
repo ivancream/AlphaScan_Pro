@@ -15,6 +15,20 @@ from backend.db import queries as _db_queries
 from backend.engines.engine_disposition import refresh_disposition_openapi_best_effort
 
 
+def _disposition_sid_variants(sid: str) -> set[str]:
+    """
+    對齊 TWSE Code（可能為 033441）與 stock_info／K 線代號（可能為 33441）。
+    不對 4 位以下代號做 int() 壓縮，避免 0050 變成 50。
+    """
+    s = str(sid or "").strip()
+    if not s or not s.isdigit():
+        return {s} if s else set()
+    out: set[str] = {s, s.zfill(4), s.zfill(6)}
+    if len(s) >= 5 and s.startswith("0"):
+        out.add(str(int(s)))
+    return {x for x in out if x}
+
+
 def _to_date(val) -> Optional[date]:
     if val is None or val == "":
         return None
@@ -40,13 +54,19 @@ def _event_end_date(raw) -> date:
     return ts.date()
 
 
-def compute_event_disposition_map(hist_map: Dict[str, pd.DataFrame]) -> Dict[str, int]:
+def compute_event_disposition_map(
+    hist_map: Dict[str, pd.DataFrame],
+) -> Tuple[Dict[str, int], frozenset[str]]:
     """
-    依每檔最後一根 K 的日期，查 disposition_events，回傳 {stock_id: 撮合分鐘數}。
-    僅包含目前落在處置區間內且 minutes > 0 的個股。
+    依每檔最後一根 K 的日期查 disposition_events。
+
+    回傳:
+        (known_mins, active_unknown)
+        - known_mins: 落在處置區間且 minutes>0 → {stock_id: 分鐘數}
+        - active_unknown: 落在處置區間但 minutes 未知／為 0 的 stock_id（顯示「處置中」用）
     """
     if not hist_map:
-        return {}
+        return {}, frozenset()
 
     last_dates: List[date] = []
     for df in hist_map.values():
@@ -54,32 +74,39 @@ def compute_event_disposition_map(hist_map: Dict[str, pd.DataFrame]) -> Dict[str
             continue
         last_dates.append(pd.Timestamp(df["Date"].iloc[-1]).date())
     if not last_dates:
-        return {}
+        return {}, frozenset()
 
     d_min, d_max = min(last_dates), max(last_dates)
     ev = _db_queries.get_disposition_events_overlapping(d_min, d_max)
     if ev.empty:
-        return {}
+        return {}, frozenset()
 
     out: Dict[str, int] = {}
+    unknown_active: set[str] = set()
     for sid, df in hist_map.items():
         if df is None or df.empty or "Date" not in df.columns:
             continue
         d = pd.Timestamp(df["Date"].iloc[-1]).date()
-        sub = ev[ev["stock_id"] == sid]
+        variants = _disposition_sid_variants(sid)
+        sub = ev[ev["stock_id"].astype(str).isin(variants)]
         if sub.empty:
             continue
         best = 0
+        in_window = False
         for _, row in sub.iterrows():
             start_d = _to_date(row.get("disp_start"))
             if start_d is None:
                 continue
             end_d = _event_end_date(row.get("disp_end"))
             if start_d <= d <= end_d:
+                in_window = True
                 best = max(best, int(row.get("minutes") or 0))
+        sid_s = str(sid)
         if best > 0:
-            out[str(sid)] = best
-    return out
+            out[sid_s] = best
+        elif in_window:
+            unknown_active.add(sid_s)
+    return out, frozenset(unknown_active)
 
 
 def enrich_scan_rows_disposition(rows: List[dict]) -> None:
@@ -107,17 +134,22 @@ def enrich_scan_rows_disposition(rows: List[dict]) -> None:
         return
 
     for r, sid, d in dated:
-        sub = ev[ev["stock_id"] == sid]
+        sub = ev[ev["stock_id"].astype(str).isin(_disposition_sid_variants(sid))]
         best = 0
+        in_window = False
         for _, row in sub.iterrows():
             start_d = _to_date(row.get("disp_start"))
             if start_d is None:
                 continue
             end_d = _event_end_date(row.get("disp_end"))
             if start_d <= d <= end_d:
+                in_window = True
                 best = max(best, int(row.get("minutes") or 0))
         if best > 0:
             r["處置狀態"] = f"每 {best} 分鐘撮合"
+            r["is_disposition"] = True
+        elif in_window:
+            r["處置狀態"] = "處置中"
             r["is_disposition"] = True
         else:
             cur = str(r.get("處置狀態", "") or "")

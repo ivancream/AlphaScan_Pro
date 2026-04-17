@@ -74,6 +74,26 @@ def upsert_stock_sectors(
     return len(rows)
 
 
+def update_stock_sectors_micro_only(rows: List[Tuple[str, Optional[str]]]) -> int:
+    """
+    只更新 stock_sectors.micro（不動 macro／meso／industry_raw）。
+    rows: [(stock_id, micro), ...]，micro 可為 None 表示清空題材欄。
+    """
+    if not rows:
+        return 0
+    with duck_write() as conn:
+        conn.executemany(
+            """
+            UPDATE stock_sectors
+            SET micro = ?, updated_at = now()
+            WHERE stock_id = ?
+            """,
+            [(micro, sid) for sid, micro in rows],
+        )
+    _log_update("stock_sectors_micro", len(rows))
+    return len(rows)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # daily_prices
 # ──────────────────────────────────────────────────────────────────────────────

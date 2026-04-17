@@ -17,8 +17,8 @@
    漲跌幅與前收相比若超過合理現股區間（>15.5%），改試當日開→收；仍異常或開收幾乎持平但與前收矛盾則 change_pct=null。
    當日成交量為 0：不計漲跌幅（null），避免快照價與歷史前收混算。
 2. 大／中視野：stock_sectors（證交所 CSV 匯入）+ twstock 後備
-3. 小視野：stock_sectors.micro、theme.json（題材→代號反轉）、data/stock_themes.json（代號覆寫）、內建 theme_data 後備。
-   題材可多個：JSON 陣列或 DB 以「、」串接；API 回傳 micros，前端族群視野可重複列示。
+3. 小視野：僅專案根目錄 theme.json（題材→代號反轉）；不在題材表之代號不帶族群標籤（前端列為（未分類））。
+   題材可多個：JSON 內同一檔可屬多鍵；API 回傳 micros，前端族群視野可重複列示。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional
 
 from backend.db.connection import DUCKDB_PATH, duck_read
 from backend.engines.theme_data import STATIC_SECTOR_MAP
-from backend.engines.theme_loader import load_json_theme_micro_lists
+from backend.engines.theme_loader import load_theme_catalog_stock_tags
 
 # 相容舊 import
 __all__ = ["get_heatmap_data", "STATIC_SECTOR_MAP"]
@@ -94,17 +94,6 @@ def _get_fallback_tags(macro: str) -> tuple[str, str]:
     return (macro, macro)
 
 
-def _split_sector_micro_to_tags(raw: str) -> list[str]:
-    """stock_sectors.micro：單一標籤，或以「、」分隔的多題材（與 refresh 寫入一致）。"""
-    s = raw.strip()
-    if not s:
-        return []
-    if "、" in s:
-        parts = [p.strip() for p in s.split("、")]
-        return [p for p in parts if p] or [s]
-    return [s]
-
-
 def _dedupe_tags_preserve(tags: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -117,21 +106,14 @@ def _dedupe_tags_preserve(tags: list[str]) -> list[str]:
 
 def _resolve_micros(
     stock_id: str,
-    sector: Optional[dict[str, Any]],
     theme_lists: dict[str, list[str]],
-    meso: str,
 ) -> list[str]:
+    """族群標籤僅來自 theme.json 目錄；無題材則空列表。"""
     if stock_id in theme_lists:
         tags = theme_lists[stock_id]
         if tags:
             return _dedupe_tags_preserve(tags)
-    if sector and (sector.get("micro") or "").strip():
-        tags = _split_sector_micro_to_tags(str(sector["micro"]))
-        if tags:
-            return _dedupe_tags_preserve(tags)
-    if stock_id in STATIC_SECTOR_MAP:
-        return [STATIC_SECTOR_MAP[stock_id][1]]
-    return [meso]
+    return []
 
 
 def _resolve_labels(
@@ -156,7 +138,7 @@ def _resolve_labels(
     else:
         meso, _ = _get_fallback_tags(macro)
 
-    micros = _resolve_micros(stock_id, sector, theme_lists, meso)
+    micros = _resolve_micros(stock_id, theme_lists)
     return macro, meso, micros
 
 
@@ -178,7 +160,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
     except Exception:
         tw_codes = {}
 
-    theme_lists = load_json_theme_micro_lists()
+    theme_lists = load_theme_catalog_stock_tags()
 
     with duck_read() as conn:
         latest_date_row = conn.execute(
@@ -282,7 +264,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
             "name": name,
             "macro": macro,
             "meso": meso,
-            "micro": micros[0],
+            "micro": micros[0] if micros else "",
             "micros": micros,
             "close": round(close, 2),
             "change_pct": change_pct,
@@ -304,7 +286,7 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
         # 供前端／除錯確認：價量來自庫表，非即時逐檔 API
         "price_source": "duckdb_daily_prices",
         "ingest_path": "scheduler_intraday_batch",
-        # theme.json + stock_themes 合併後有設定題材的代號數（其餘族群列仍可能為產業 meso）
+        # theme.json 題材表內有標籤的代號數（其餘在族群視野列為（未分類））
         "theme_micro_ticker_count": len(theme_lists),
         "stocks": stocks,
     }

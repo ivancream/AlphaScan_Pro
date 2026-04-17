@@ -26,7 +26,7 @@ import urllib.request
 from backend.db import writer
 from backend.db.writer import log_update_error
 from backend.db.sector_micro_sync import apply_theme_json_to_stock_sectors
-from backend.engines.theme_loader import THEMES_JSON, load_json_theme_micro_lists
+from backend.engines.theme_loader import THEMES_JSON, load_theme_catalog_stock_tags
 from backend.scripts.industry_codes import industry_name
 
 TSE_CSV = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
@@ -73,7 +73,7 @@ def run_stock_sectors_refresh() -> int:
     except Exception:
         tw_codes = {}
 
-    theme_lists = load_json_theme_micro_lists()
+    theme_lists = load_theme_catalog_stock_tags()
 
     all_rows: list[tuple[str, str, str, str | None, str]] = []
     seen: set[str] = set()
@@ -118,7 +118,7 @@ def run_stock_sectors_refresh() -> int:
     t_n, t_ins = apply_theme_json_to_stock_sectors()
     print(
         f"[StockSectors] Theme micro sync: {t_n} rows "
-        f"(theme-only inserts: {t_ins}; theme.json + stock_themes.json → micro)."
+        f"(theme-only inserts: {t_ins}; theme.json → micro)."
     )
     return n
 

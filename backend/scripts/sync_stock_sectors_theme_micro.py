@@ -1,5 +1,5 @@
 """
-依專案根目錄 theme.json（及 data/stock_themes.json 覆寫）更新 DuckDB stock_sectors.micro。
+依專案根目錄 theme.json 更新 DuckDB stock_sectors.micro；不在題材表之代號 micro 清空。
 
 執行：
     python -m backend.scripts.sync_stock_sectors_theme_micro

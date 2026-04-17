@@ -90,6 +90,13 @@ def _mins_display_to_int(mins_label: str, measures: str = "") -> int:
     if t in mapping:
         return mapping[t]
     text = measures or ""
+    # 舊版 _parse_mins 曾把「第 N 次處置」標成異常；DB 內 minutes=0 時仍可依 measures 還原
+    if "第三次處置" in t or "第三次處置" in text:
+        return 45
+    if "第二次處置" in t or "第二次處置" in text:
+        return 20
+    if "第一次處置" in t or "第一次處置" in text:
+        return 5
     for pat in (r"(\d+)\s*分鐘", r"每[^\d]*(\d+)\s*分"):
         m = re.search(pat, text)
         if m:
@@ -251,6 +258,13 @@ def refresh_disposition_openapi_best_effort(*, force: bool = False) -> None:
 def _parse_mins(text: str) -> str:
     if not text:
         return '未知'
+    # TWSE／櫃買 OpenAPI 常只給「第 N 次處置」，不含「5 分鐘」字面，否則會落到「異常」→ minutes=0 → 盤中永遠顯示「-」
+    if "第三次處置" in text:
+        return "45分"
+    if "第二次處置" in text:
+        return "20分"
+    if "第一次處置" in text:
+        return "5分"
     if '5分鐘' in text or '五分鐘' in text or '5分' in text:
         return '5分'
     if '10分鐘' in text or '十分鐘' in text or '10分' in text:

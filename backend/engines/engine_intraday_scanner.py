@@ -285,6 +285,7 @@ def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
     industry = payload["industry"]
     max_date_limit = payload["max_date_limit"]
     event_disp_mins = int(payload.get("event_disp_mins") or 0)
+    event_disp_active_unknown = bool(payload.get("event_disp_active_unknown"))
 
     # 注入今日盤中快照
     # 若尚未寫入今日處置資料，沿用最後一筆已知處置分鐘數，避免把處置狀態覆蓋成 0。
@@ -401,6 +402,15 @@ def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
             if det.get("cond_slope") and det.get("cond_bb_level"):
                 from_db = int(df.iloc[-1].get("Disposition_Mins", 0) or 0)
                 disp_val = event_disp_mins if event_disp_mins > 0 else from_db
+                if disp_val > 0:
+                    disp_str = f"每 {int(disp_val)} 分鐘撮合"
+                    is_disp = True
+                elif event_disp_active_unknown:
+                    disp_str = "處置中"
+                    is_disp = True
+                else:
+                    disp_str = "-"
+                    is_disp = False
                 result["wanderer"] = {
                     **base_row,
                     "月線斜率(%)":  round(q_wand.get("MA20_Slope_Pct", 0), 4),
@@ -408,8 +418,8 @@ def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
                     "布林上軌":      round(q_wand.get("BB_Upper", 0), 2),
                     "布林中軌":      round(q_wand.get("BB_Middle", 0), 2),
                     "布林下軌":      round(q_wand.get("BB_Lower", 0), 2),
-                    "處置狀態":      f"每 {int(disp_val)} 分鐘撮合" if disp_val > 0 else "-",
-                    "is_disposition": bool(disp_val > 0),
+                    "處置狀態":      disp_str,
+                    "is_disposition": is_disp,
                     "_q_data":       q_wand,
                 }
         except Exception:
@@ -477,7 +487,7 @@ def _run_scan() -> None:
         except Exception as disp_exc:  # noqa: BLE001
             print(f"[Scanner #{scan_id}] 處置清單同步失敗（沿用 DuckDB）: {disp_exc}")
 
-        disp_event_by_sid = compute_event_disposition_map(history_cache)
+        disp_event_by_sid, disp_unknown_active = compute_event_disposition_map(history_cache)
 
         # ── 4. 取全局最新日期，過濾過時股票 ─────────────────────────────────
         max_date_str = _db_queries.get_latest_price_date()
@@ -514,7 +524,8 @@ def _run_scan() -> None:
                 "market": row.get("market_type", ""),
                 "industry": industry,
                 "max_date_limit": max_date_limit,
-                "event_disp_mins": disp_event_by_sid.get(sid, 0),
+                "event_disp_mins": disp_event_by_sid.get(str(sid), 0),
+                "event_disp_active_unknown": str(sid) in disp_unknown_active,
             })
 
         # ── 7. ProcessPoolExecutor 多核平行策略計算 ──────────────────────────
