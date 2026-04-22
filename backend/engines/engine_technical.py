@@ -292,6 +292,27 @@ class BollingerStrategy:
                 df[col] = np.nan
         return df
 
+    @staticmethod
+    def wanderer_drawdown_from_high_pct(df, lookback: int = 10) -> float:
+        """
+        近 lookback 根日 K 區間內最高價相對最後收盤之跌幅(%)（正值＝距離該區間高點回落幅度）。
+        預設 lookback=10：以最近 10 根日 K 的最高點為「高點」。
+        """
+        if df is None or len(df) < 1:
+            return 0.0
+        if "High" not in df.columns or "Close" not in df.columns:
+            return 0.0
+        n = min(lookback, len(df))
+        tail = df.iloc[-n:]
+        try:
+            ph = float(pd.to_numeric(tail["High"], errors="coerce").max())
+            close = float(pd.to_numeric(df.iloc[-1]["Close"], errors="coerce"))
+        except Exception:
+            return 0.0
+        if ph <= 0 or pd.isna(ph) or pd.isna(close):
+            return 0.0
+        return round((ph - close) / ph * 100.0, 2)
+
     @classmethod
     def analyze(cls, df, upper_slope_threshold=0.003, vol_surge_multiplier=1.5):
         df = cls.calculate_indicators(df)
@@ -501,6 +522,13 @@ class BollingerStrategy:
         details_map = {}
         min_rows = 120 if strategy == "short" else 60
 
+        sector_rows = _db_queries.get_stock_sector_rows()
+        try:
+            import twstock
+            _tw_codes = twstock.codes
+        except Exception:
+            _tw_codes = {}
+
         max_date_limit = None
         if _price_cache:
             all_last = [g["Date"].max() if "Date" in g.columns else g.iloc[:, 0].max()
@@ -510,7 +538,7 @@ class BollingerStrategy:
                 max_date_limit = global_max - pd.Timedelta(days=5)
 
         for idx, row in stock_info.iterrows():
-            stock_id = row["stock_id"]
+            stock_id = str(row["stock_id"]).strip()
             name = row["name"] or ""
             market = row.get("market_type", "")
 
@@ -567,12 +595,12 @@ class BollingerStrategy:
 
             data_date = pd.to_datetime(full_df.iloc[-1]['Date']).strftime('%Y-%m-%d') if 'Date' in full_df.columns else ''
 
-            try:
-                import twstock
-                tw_codes = twstock.codes
-                industry = getattr(tw_codes.get(stock_id), "group", "其他") if tw_codes.get(stock_id) else "其他"
-            except Exception:
-                industry = "其他"
+            industry = _db_queries.resolve_industry_label(
+                stock_id,
+                sector_rows,
+                _tw_codes,
+                market=str(market or ""),
+            )
 
             suffix = ".TWO" if market in ("OTC", "上櫃") else ".TW"
             real_ticker = f"{stock_id}{suffix}"
@@ -749,8 +777,15 @@ class BollingerStrategy:
             if all_last:
                 max_date_limit = pd.to_datetime(max(all_last)) - pd.Timedelta(days=5)
 
+        sector_rows = _db_queries.get_stock_sector_rows()
+        try:
+            import twstock
+            _tw_codes_w = twstock.codes
+        except Exception:
+            _tw_codes_w = {}
+
         for idx, row in stock_info.iterrows():
-            stock_id = row['stock_id']
+            stock_id = str(row['stock_id']).strip()
             name = row['name'] or ''
             market = row.get('market_type', '')
 
@@ -781,17 +816,19 @@ class BollingerStrategy:
             suffix = '.TWO' if market in ('OTC', '上櫃') else '.TW'
             real_ticker = f'{stock_id}{suffix}'
 
-            try:
-                import twstock
-                tw_codes = twstock.codes
-                industry = getattr(tw_codes.get(stock_id), "group", "其他") if tw_codes.get(stock_id) else "其他"
-            except Exception:
-                industry = "其他"
+            industry = _db_queries.resolve_industry_label(
+                stock_id,
+                sector_rows,
+                _tw_codes_w,
+                market=str(market or ""),
+            )
 
             # 讀取最後一天的處置狀態
             disp_val = df.iloc[-1]['Disposition_Mins'] if 'Disposition_Mins' in df.columns else 0
             disp_str = f"每 {int(disp_val)} 分鐘撮合" if disp_val > 0 else "-"
             data_date = pd.to_datetime(df.iloc[-1]['Date']).strftime('%Y-%m-%d') if 'Date' in df.columns else ''
+
+            dd_from_high = cls.wanderer_drawdown_from_high_pct(full_df)
 
             result_row = {
                 '代號': stock_id,
@@ -803,6 +840,7 @@ class BollingerStrategy:
                 '成交額(億)': round((full_df.iloc[-1]['Close'] * full_df.iloc[-1]['Volume']) / 1e8, 2) if all(k in full_df.columns for k in ['Close', 'Volume']) else 0,
                 '月線斜率(%)': round(q_data['MA20_Slope_Pct'], 4),
                 '布林位階': round(q_data['BB_Position'], 2),
+                '自高點下跌(%)': dd_from_high,
                 '資料日期': data_date,
                 '處置狀態': disp_str,
                 'is_disposition': bool(disp_val > 0),

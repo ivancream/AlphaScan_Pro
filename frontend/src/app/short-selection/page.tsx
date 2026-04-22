@@ -7,6 +7,12 @@ import { useNavigate } from 'react-router-dom';
 import { ChipsAnalysisWidget } from '@/components/chips/ChipsAnalysisWidget';
 import { TrendingDown, Activity } from 'lucide-react';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
+import { formatTaipeiScanTime, scannerResultsSourceLabel } from '@/lib/scanMeta';
+import {
+    DEFAULT_SHORT_SELECTION,
+    loadShortSelectionParams,
+    saveShortSelectionParams,
+} from '@/lib/selectionParams';
 
 function formatSwingScanError(err: unknown): string {
     if (isAxiosError(err)) {
@@ -65,13 +71,13 @@ export default function SwingShortPage() {
         setScanned('short_sell');
     }, [setScanned]);
 
-    // UI 篩選（前端即時過濾，不觸發後端重掃）
-    const [filters, setFilters] = useState({
-        req_ma: true,
-        req_slope: true,
-        req_chips: true,
-        req_near_band: true
-    });
+    // UI 篩選（前端即時過濾）；勾選可自訂並存於 localStorage（預設全選＝原行為）
+    const [storedShort, setStoredShort] = useState(() => loadShortSelectionParams());
+    const { filters } = storedShort;
+
+    useEffect(() => {
+        saveShortSelectionParams(storedShort);
+    }, [storedShort]);
 
     // ── 快速路徑：intraday scanner 記憶體快取（< 100ms） ────────────────────
     const { data: fastData, isLoading: isFastLoading } = useSwingFast('short', true);
@@ -84,6 +90,8 @@ export default function SwingShortPage() {
         useSwingShort(isScanned && !hasFastResults && !isFastLoading, shortServerParams);
 
     const scanResults: ScanRow[] = hasFastResults ? fastItems : ((slowResults ?? []) as ScanRow[]);
+    const slowEnabled = !hasFastResults && !isFastLoading;
+    const usingSlowPath = slowEnabled && scanResults.length > 0;
     const isLoading = isFastLoading || isLoadingSlow;
     const [selectedItem, setSelectedItem] = useState<ScanRow | null>(null);
 
@@ -110,7 +118,10 @@ export default function SwingShortPage() {
         if (filters.req_near_band && item['沿下軌'] !== 'V') return false;
         return true;
     });
-    const latestDataDate = filteredResults[0]?.['資料日期'] ?? '-';
+    const klineRefDate =
+        (filteredResults[0]?.['資料日期'] as string | undefined) ??
+        (scanResults[0]?.['資料日期'] as string | undefined) ??
+        '-';
 
     return (
         <div className="p-6 space-y-6 animate-in fade-in duration-500 text-gray-200">
@@ -120,6 +131,9 @@ export default function SwingShortPage() {
                         <span className="w-1.5 h-8 bg-green-500 rounded-full inline-block"></span>
                         空方選股策略
                     </h2>
+                    <p className="text-[10px] text-gray-500 mt-2 max-w-xl">
+                        盤中為數分鐘級快照（後端排程＋永豐），非逐筆即時報價。
+                    </p>
                 </div>
                 <button
                     onClick={() => {
@@ -148,37 +162,66 @@ export default function SwingShortPage() {
 
             {/* 策略篩選與參數配置 */}
             <div className="bg-[#161B22] border border-green-800/40 rounded-xl p-5 space-y-4">
-                <div className="flex justify-between items-center border-b border-gray-800 pb-2">
+                <div className="flex flex-wrap justify-between items-center gap-2 border-b border-gray-800 pb-2">
                     <p className="text-green-400 font-bold text-sm tracking-wider uppercase">策略篩選條件</p>
-                    <span className="text-xs text-gray-500 italic">勾選後將僅顯示符合該條件的標的</span>
+                    <div className="flex flex-wrap items-center gap-3">
+                        <span className="text-xs text-gray-500 italic">勾選後將僅顯示符合該條件的標的</span>
+                        <button
+                            type="button"
+                            onClick={() => setStoredShort({ ...DEFAULT_SHORT_SELECTION })}
+                            className="text-xs text-gray-500 hover:text-white underline-offset-2 hover:underline"
+                        >
+                            重設為預設
+                        </button>
+                    </div>
                 </div>
                 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <FilterCheckbox 
                         label="均線空排" 
                         checked={filters.req_ma} 
-                        onChange={(val) => setFilters(prev => ({ ...prev, req_ma: val }))}
+                        onChange={(val) =>
+                            setStoredShort((prev) => ({
+                                ...prev,
+                                filters: { ...prev.filters, req_ma: val },
+                            }))
+                        }
                         desc="MA5 < MA10 < MA20"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="月線下彎" 
                         checked={filters.req_slope} 
-                        onChange={(val) => setFilters(prev => ({ ...prev, req_slope: val }))}
+                        onChange={(val) =>
+                            setStoredShort((prev) => ({
+                                ...prev,
+                                filters: { ...prev.filters, req_slope: val },
+                            }))
+                        }
                         desc="月線斜率 < 0"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="籌碼渙散" 
                         checked={filters.req_chips} 
-                        onChange={(val) => setFilters(prev => ({ ...prev, req_chips: val }))}
+                        onChange={(val) =>
+                            setStoredShort((prev) => ({
+                                ...prev,
+                                filters: { ...prev.filters, req_chips: val },
+                            }))
+                        }
                         desc="大戶減 / 散戶增"
                         color="green"
                     />
                     <FilterCheckbox 
                         label="沿下軌" 
                         checked={filters.req_near_band} 
-                        onChange={(val) => setFilters(prev => ({ ...prev, req_near_band: val }))}
+                        onChange={(val) =>
+                            setStoredShort((prev) => ({
+                                ...prev,
+                                filters: { ...prev.filters, req_near_band: val },
+                            }))
+                        }
                         desc="靠近布林下軌 (低買)"
                         color="green"
                     />
@@ -187,9 +230,34 @@ export default function SwingShortPage() {
 
             {isScanned && (
                 <div className="bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-xl">
-                    {!isLoading && !error && filteredResults.length > 0 && (
-                        <div className="px-6 py-3 text-xs text-gray-500 border-b border-gray-800 bg-[#0E1117]">
-                            資料日期：{latestDataDate}
+                    {!isLoading && !error && (
+                        <div className="px-6 py-3 border-b border-gray-800 bg-[#0E1117] text-[11px] text-gray-500 leading-relaxed space-y-0.5">
+                            <p title="技術指標使用最後一根 K 棒的交易日；盤中快照成功時應為當日日期，非即時報價時間戳。">
+                                <span className="text-gray-400">K 線基準日</span>：{klineRefDate}
+                            </p>
+                            <p>
+                                {usingSlowPath ? (
+                                    <>
+                                        <span className="text-gray-400">列表來源</span>
+                                        ：全市場掃描（快速路徑尚無資料）
+                                        {fastData?.last_run ? (
+                                            <>
+                                                {' '}
+                                                · <span className="text-gray-400">盤中排程上次完成</span>：
+                                                {formatTaipeiScanTime(fastData.last_run)}
+                                            </>
+                                        ) : null}
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="text-gray-400">最後掃描（台北）</span>：
+                                        {formatTaipeiScanTime(fastData?.last_run)}
+                                        {' · '}
+                                        <span className="text-gray-400">快取</span>：
+                                        {scannerResultsSourceLabel(fastData?.source)}
+                                    </>
+                                )}
+                            </p>
                         </div>
                     )}
 

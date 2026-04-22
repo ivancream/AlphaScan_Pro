@@ -49,7 +49,7 @@ class HeatmapDataResponse(BaseModel):
 async def get_heatmap_data():
     """
     取得資金流向數據（全市場漲跌幅、成交金額、三層產業標籤）。
-    價量僅讀 DuckDB daily_prices（由排程批次 snapshots／yf batch 寫入）；不經 LiveQuote 快取。
+    價量先讀 DuckDB daily_prices；若已設定永豐憑證，回傳前再以 Shioaji snapshots 覆寫全市場列（盤中即時度與排程解耦）。
     """
     try:
         # DuckDB 為全域鎖；同步查詢會阻塞事件迴圈，啟動 catchup 寫庫時易讓前端代理逾時 (502)

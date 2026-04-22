@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
+from .cache_store import IntradayAlertCounter
 from .sinopac_session import sinopac_session
 from .engine_technical import BollingerStrategy
 from .disposition_overlay import compute_event_disposition_map, enrich_scan_rows_disposition
@@ -75,6 +76,7 @@ _scan_lock = threading.Lock()
 # None = 尚無任何一次成功掃描（第一次成功掃描僅建立基準線，不發通知）
 _prev_hit_ids_long: Optional[Set[str]] = None
 _prev_hit_ids_short: Optional[Set[str]] = None
+_prev_hit_ids_wanderer: Optional[Set[str]] = None
 
 
 def _row_stock_id(row: Dict) -> str:
@@ -100,8 +102,11 @@ def get_scan_notify_state() -> Dict:
         "only_new_triggers": _only_new_trigger_notify(),
         "baseline_seeded_long":  _prev_hit_ids_long is not None,
         "baseline_seeded_short": _prev_hit_ids_short is not None,
+        "baseline_seeded_wanderer": _prev_hit_ids_wanderer is not None,
         "prev_count_long":  len(_prev_hit_ids_long) if _prev_hit_ids_long is not None else None,
         "prev_count_short": len(_prev_hit_ids_short) if _prev_hit_ids_short is not None else None,
+        "prev_count_wanderer": len(_prev_hit_ids_wanderer) if _prev_hit_ids_wanderer is not None else None,
+        "intraday_alert_counter": IntradayAlertCounter.snapshot_stats(),
     }
 
 
@@ -135,6 +140,31 @@ def _compute_new_triggers_vs_prev(
     _prev_hit_ids_long = curr_long
     _prev_hit_ids_short = curr_short
     return new_long, new_short, True
+
+
+def _compute_new_triggers_wanderer(
+    results_wanderer: List[Dict],
+) -> Tuple[List[Dict], bool]:
+    """
+    浪子回頭：與多/空相同的「新觸發」差集邏輯（受 DISCORD_NOTIFY_ONLY_NEW_TRIGGERS 控制）。
+    回傳 (待推送列, 是否使用新觸發 Embed 文案)。
+    """
+    global _prev_hit_ids_wanderer
+
+    curr = {_row_stock_id(r) for r in results_wanderer if _row_stock_id(r)}
+    use_diff = _only_new_trigger_notify()
+
+    if not use_diff:
+        _prev_hit_ids_wanderer = curr
+        return results_wanderer, False
+
+    new_w: List[Dict] = []
+    if _prev_hit_ids_wanderer is not None:
+        new_w = [r for r in results_wanderer if _row_stock_id(r) not in _prev_hit_ids_wanderer]
+
+    _prev_hit_ids_wanderer = curr
+    return new_w, True
+
 
 # ── 輔助函式 ─────────────────────────────────────────────────────────────────
 
@@ -208,7 +238,7 @@ def _load_all_history() -> Dict[str, pd.DataFrame]:
     all_df["Date"] = pd.to_datetime(all_df["Date"])
 
     return {
-        sid: grp.drop(columns=["stock_id"]).reset_index(drop=True)
+        str(sid).strip(): grp.drop(columns=["stock_id"]).reset_index(drop=True)
         for sid, grp in all_df.groupby("stock_id")
     }
 
@@ -411,10 +441,12 @@ def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
                 else:
                     disp_str = "-"
                     is_disp = False
+                dd_from_high = BollingerStrategy.wanderer_drawdown_from_high_pct(df)
                 result["wanderer"] = {
                     **base_row,
                     "月線斜率(%)":  round(q_wand.get("MA20_Slope_Pct", 0), 4),
                     "布林位階":      round(q_wand.get("BB_Position", 0), 2),
+                    "自高點下跌(%)": dd_from_high,
                     "布林上軌":      round(q_wand.get("BB_Upper", 0), 2),
                     "布林中軌":      round(q_wand.get("BB_Middle", 0), 2),
                     "布林下軌":      round(q_wand.get("BB_Lower", 0), 2),
@@ -496,25 +528,25 @@ def _run_scan() -> None:
             if max_date_str else None
         )
 
-        # ── 5. twstock 產業分類（只載入一次） ────────────────────────────────
+        # ── 5. 產業：證交所 stock_sectors 優先，其次 twstock（只載入一次） ───────
         tw_codes = _load_twstock_codes()
+        sector_rows = _db_queries.get_stock_sector_rows()
 
         # ── 6. 組裝 worker 工作清單 ──────────────────────────────────────────
         _SCAN_CACHE["message"] = f"開始策略計算（{total} 檔）..."
         work_items: List[Dict] = []
         for _, row in stock_info.iterrows():
-            sid = row["stock_id"]
+            sid = str(row["stock_id"]).strip()
             df = history_cache.get(sid)
             if df is None or len(df) < 60:
                 continue
 
-            industry = "其他"
-            try:
-                code_obj = tw_codes.get(sid)
-                if code_obj:
-                    industry = getattr(code_obj, "group", "其他")
-            except Exception:
-                pass
+            industry = _db_queries.resolve_industry_label(
+                sid,
+                sector_rows,
+                tw_codes,
+                market=str(row.get("market_type", "") or ""),
+            )
 
             work_items.append({
                 "stock_id": sid,
@@ -583,33 +615,40 @@ def _run_scan() -> None:
         })
         print(f"[Scanner #{scan_id}] {msg}")
 
-        # ── Discord：狀態比對後只佇列「新觸發」（避免每 30 分鐘重複洗版）──────
-        new_long, new_short, only_new_triggers = _compute_new_triggers_vs_prev(
+        # ── Discord：新觸發差集 + 盤中防洗版（每檔每策略每日最多 N 次）──────────
+        cand_long, cand_short, only_new_triggers = _compute_new_triggers_vs_prev(
             results_long, results_short
         )
+        cand_wanderer, only_new_w = _compute_new_triggers_wanderer(results_wanderer)
+
+        max_alerts = IntradayAlertCounter.max_per_strategy_per_day()
+        allowed_long = IntradayAlertCounter.filter_rows_under_cap(
+            cand_long, "long", max_alerts
+        )
+        allowed_short = IntradayAlertCounter.filter_rows_under_cap(
+            cand_short, "short", max_alerts
+        )
+        allowed_wanderer = IntradayAlertCounter.filter_rows_under_cap(
+            cand_wanderer, "wanderer", max_alerts
+        )
+
         try:
             from . import notifier as _nf
             _notify_on = _nf.is_notify_enabled()
         except Exception:
             _notify_on = False
 
+        only_new_embed = bool(only_new_triggers or only_new_w)
+
         if _notify_on:
-            if only_new_triggers:
-                if new_long or new_short:
-                    _SCAN_CACHE["_pending_notify"] = {
-                        "scan_id":             scan_id,
-                        "scan_time":           scan_time,
-                        "long":                new_long,
-                        "short":               new_short,
-                        "only_new_triggers":   True,
-                    }
-            else:
+            if allowed_long or allowed_short or allowed_wanderer:
                 _SCAN_CACHE["_pending_notify"] = {
                     "scan_id":             scan_id,
                     "scan_time":           scan_time,
-                    "long":                results_long,
-                    "short":               results_short,
-                    "only_new_triggers":   False,
+                    "long":                allowed_long,
+                    "short":               allowed_short,
+                    "wanderer":            allowed_wanderer,
+                    "only_new_triggers":   only_new_embed,
                 }
 
     except Exception as exc:
@@ -648,13 +687,15 @@ async def _scanner_loop() -> None:
                 if pending:
                     try:
                         n = _get_notifier()
-                        await n.notify_scan_results(
-                            results_long  = pending["long"],
-                            results_short = pending["short"],
-                            scan_id       = pending["scan_id"],
-                            scan_time     = pending["scan_time"],
+                        res = await n.notify_scan_results(
+                            results_long=pending["long"],
+                            results_short=pending["short"],
+                            scan_id=pending["scan_id"],
+                            scan_time=pending["scan_time"],
                             only_new_triggers=pending.get("only_new_triggers", False),
+                            results_wanderer=pending.get("wanderer"),
                         )
+                        IntradayAlertCounter.apply_after_discord_notify(res, pending)
                     except Exception as notify_exc:
                         print(f"[Scanner Notifier] 推送失敗（不影響掃描）: {notify_exc}")
             else:

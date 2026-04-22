@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .connection import user_db
 
@@ -94,6 +94,18 @@ def write_signals(
             )
             """
         )
+
+
+def get_latest_scan_time_for_strategy(strategy: str) -> Optional[str]:
+    """最近一次寫入 intraday_signals 的 scan_time（ISO 字串），供 API 在記憶體為空時對齊 last_run。"""
+    with user_db() as conn:
+        row = conn.execute(
+            "SELECT MAX(scan_time) AS t FROM intraday_signals WHERE strategy = ?",
+            (strategy,),
+        ).fetchone()
+    if row and row["t"]:
+        return str(row["t"])
+    return None
 
 
 def get_latest_signals(strategy: str, limit: int = 200) -> List[Dict[str, Any]]:

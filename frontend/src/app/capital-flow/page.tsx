@@ -347,7 +347,9 @@ export default function CapitalFlowPage() {
                             資金流向
                         </h2>
                         <p className="text-gray-400 mt-2 ml-4">
-                            板塊聚合：點列展開成分股子表（可欄位排序）；資料與列表同源、無額外請求。
+                            板塊聚合：點列展開成分股子表（可欄位排序）；後端先讀 DuckDB，若已設定永豐憑證則以
+                            <span className="text-orange-300/90"> Shioaji snapshots</span>
+                            覆寫全表價量（與排程寫庫節奏解耦）。資料與列表同源、無額外請求。
                             {viewLevel === 'micro' &&
                                 data?.theme_micro_ticker_count != null &&
                                 data.theme_micro_ticker_count > 0 && (

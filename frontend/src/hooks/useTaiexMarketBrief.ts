@@ -35,6 +35,10 @@ export interface TaiexOverviewPayload {
   futures: FuturesStrip;
   stocks: WeightStockRow[];
   error?: string | null;
+  /** sinopac = 永豐盤中 snapshots；yfinance = 降級 */
+  data_source?: string;
+  /** 走勢圖序列來源（可能仍為 yfinance 分鐘線） */
+  series_source?: string | null;
 }
 
 /**

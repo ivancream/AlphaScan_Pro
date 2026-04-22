@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.db.user_db import get_latest_scan_time_for_strategy
 from backend.engines.engine_intraday_scanner import (
     get_scan_status,
     get_scan_results,
@@ -81,11 +82,18 @@ async def scanner_results(
         source = "db" if items else "empty"
 
     items = items[:limit]
+
+    last_run = _SCAN_CACHE.get("last_run")
+    if source == "db":
+        db_t = get_latest_scan_time_for_strategy(strategy)
+        if db_t:
+            last_run = db_t
+
     return {
         "strategy": strategy,
         "count":    len(items),
         "source":   source,
-        "last_run": _SCAN_CACHE.get("last_run"),
+        "last_run": last_run,
         "items":    items,
     }
 

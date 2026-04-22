@@ -33,7 +33,7 @@ export interface HeatmapData {
     message?: string;
     as_of_date?: string | null;
     data_freshness?: string | null;
-    /** duckdb_daily_prices — 與即時 LiveQuote 解耦 */
+    /** duckdb_daily_prices 或合併 sinopac_snapshot */
     price_source?: string | null;
     /** scheduler_intraday_batch */
     ingest_path?: string | null;

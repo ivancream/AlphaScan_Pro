@@ -5,13 +5,18 @@ Discord Webhook 警報模組 (AlphaScan Pro Notifier)
 ─────────────────────────────────────────────────────────────────────────────
 • send_discord_alert()   — 底層送出單一 Embed 訊息（非同步，requests 在 executor 中執行）
 • build_scan_embeds()    — 將掃描結果轉為 Discord Embed 清單（含分頁，每批 ≤ 10 檔）
-• notify_scan_results()  — 多方 / 空方 掃描完成後呼叫此函式
+• notify_scan_results()  — 多方 / 空方 / 浪子回頭 掃描完成後呼叫此函式
 • notify_watchlist()     — 自選清單開收盤彙報 / 條件觸發時呼叫此函式
+• notify_morning_brief() — 09:30 早盤族群動能快報
+• notify_capital_flow_ignites() — 盤中 5 分鐘族群資金點火警報
 
 環境變數（設定於專案根目錄 .env）：
   DISCORD_WEBHOOK_LONG       多方選股 Webhook URL
   DISCORD_WEBHOOK_SHORT      空方選股 Webhook URL
   DISCORD_WEBHOOK_WATCHLIST  自選清單 Webhook URL
+  DISCORD_WEBHOOK_MORNING_BRIEF  早盤族群快報（可選；未設定則沿用 DISCORD_WEBHOOK_WATCHLIST）
+  DISCORD_WEBHOOK_CAPITAL_FLOW   資金流入監控（可選；未設定則沿用 DISCORD_WEBHOOK_WATCHLIST）
+  DISCORD_NOTIFY_CAPITAL_FLOW      是否推送資金點火警報 (true/false，預設 true)
   DISCORD_NOTIFY_ON_SCAN          掃描完成後是否自動推送 (true/false，預設 false)
   DISCORD_NOTIFY_ONLY_NEW_TRIGGERS 僅推送「與上一輪掃描相比新進榜」標的 (true/false，預設 true)
   DISCORD_MAX_STOCKS               每則訊息最多顯示幾檔（預設 10）
@@ -50,9 +55,11 @@ def _get_env(key: str, default: str = "") -> str:
 def get_webhook_config() -> Dict[str, str]:
     """回傳目前所有 Discord Webhook 設定（URL 僅顯示前 40 字元供除錯）。"""
     urls = {
-        "long":      _get_env("DISCORD_WEBHOOK_LONG"),
-        "short":     _get_env("DISCORD_WEBHOOK_SHORT"),
-        "watchlist": _get_env("DISCORD_WEBHOOK_WATCHLIST"),
+        "long":          _get_env("DISCORD_WEBHOOK_LONG"),
+        "short":         _get_env("DISCORD_WEBHOOK_SHORT"),
+        "watchlist":     _get_env("DISCORD_WEBHOOK_WATCHLIST"),
+        "morning_brief": _get_env("DISCORD_WEBHOOK_MORNING_BRIEF"),
+        "capital_flow": _get_env("DISCORD_WEBHOOK_CAPITAL_FLOW"),
     }
     return {
         k: (v[:40] + "…" if len(v) > 40 else v) if v else "(未設定)"
@@ -63,6 +70,11 @@ def get_webhook_config() -> Dict[str, str]:
 def is_notify_enabled() -> bool:
     """DISCORD_NOTIFY_ON_SCAN=true 時才自動推送。"""
     return _get_env("DISCORD_NOTIFY_ON_SCAN", "false").lower() in ("1", "true", "yes")
+
+
+def is_capital_flow_notify_enabled() -> bool:
+    """DISCORD_NOTIFY_CAPITAL_FLOW≠false 時推送盤中資金點火警報。"""
+    return _get_env("DISCORD_NOTIFY_CAPITAL_FLOW", "true").lower() in ("1", "true", "yes")
 
 
 def _max_stocks() -> int:
@@ -256,24 +268,30 @@ async def notify_scan_results(
     scan_time: str,
     *,
     only_new_triggers: bool = False,
+    results_wanderer: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """
-    掃描完成後推送多方 / 空方結果至各自的 Discord Webhook。
+    掃描完成後推送多方 / 空方 / 浪子回頭至 Discord Webhook。
     若 DISCORD_NOTIFY_ON_SCAN != true 則直接跳過。
     only_new_triggers=True 時 Embed 標題與說明改為「新觸發」（payload 應已由掃描器做差集）。
 
+    浪子回頭預設使用 DISCORD_WEBHOOK_LONG（未設定則改 DISCORD_WEBHOOK_WATCHLIST）。
+
     Returns:
-        {"long": [...結果], "short": [...結果]}
+        {"long": [...], "short": [...], "wanderer": [...]} 各為 HTTP 結果 dict 列表；
+        若 skipped 則含 skipped / reason。
     """
     if not is_notify_enabled():
         return {"skipped": True, "reason": "DISCORD_NOTIFY_ON_SCAN 未啟用"}
 
     embed_variant = "new_triggers" if only_new_triggers else "full"
-    if not results_long and not results_short:
+    wand = results_wanderer or []
+    if not results_long and not results_short and not wand:
         return {"skipped": True, "reason": "無待推送標的"}
 
     url_long  = _get_env("DISCORD_WEBHOOK_LONG")
     url_short = _get_env("DISCORD_WEBHOOK_SHORT")
+    url_wanderer = url_long or _get_env("DISCORD_WEBHOOK_WATCHLIST")
     summary: Dict[str, Any] = {}
 
     async def _send_strategy(url: str, strategy: str, results: List[Dict]) -> List[Dict]:
@@ -301,6 +319,12 @@ async def notify_scan_results(
         summary["short"] = await _send_strategy(url_short, "short", results_short)
     else:
         summary["short"] = []
+
+    # 浪子回頭（盤中即時警報）
+    if url_wanderer and wand:
+        summary["wanderer"] = await _send_strategy(url_wanderer, "wanderer", wand)
+    else:
+        summary["wanderer"] = []
 
     return summary
 
@@ -355,6 +379,145 @@ async def notify_watchlist(
         message=description,
         color=COLOR_WATCHLIST,
         fields=fields if fields else None,
+    )
+
+
+def _truncate_field_value(text: str, max_len: int = 1020) -> str:
+    """Discord Embed field value 上限 1024 字元。"""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _fmt_theme_brief_block(rows: List[Dict[str, Any]], *, empty_label: str) -> str:
+    if not rows:
+        return empty_label
+    lines: List[str] = []
+    for row in rows:
+        name = row.get("name", "?")
+        avg = row.get("avg_pct", 0)
+        leaders = row.get("leaders") or []
+        leader_parts: List[str] = []
+        for L in leaders[:2]:
+            sid = L.get("sid", "?")
+            pct = L.get("pct", 0)
+            leader_parts.append(f"**{sid}** {_fmt_change(pct)}")
+        avg_s = _fmt_change(avg)
+        if leader_parts:
+            lines.append(f"**{name}** ｜ 均 {avg_s} ｜ 領頭羊：{'  ·  '.join(leader_parts)}")
+        else:
+            lines.append(f"**{name}** ｜ 均 {avg_s}")
+    return "\n".join(lines)
+
+
+async def notify_morning_brief(
+    top_themes: List[Dict[str, Any]],
+    bottom_themes: List[Dict[str, Any]],
+    *,
+    as_of: Optional[str] = None,
+    error_hint: Optional[str] = None,
+) -> Dict:
+    """
+    早盤族群動能快報（Discord Embed，藍色資訊條）。
+
+    Args:
+        top_themes:    generate_morning_brief() 回傳的 top_themes（漲幅前五）。
+        bottom_themes: 跌幅前五。
+        as_of:         產出時間字串（可選）。
+        error_hint:    失敗原因簡述（可選）；有值時會寫入 description。
+
+    每筆 row 建議格式::
+        {"name": str, "avg_pct": float, "leaders": [{"sid": str, "pct": float}, ...]}
+    """
+    url = _get_env("DISCORD_WEBHOOK_MORNING_BRIEF") or _get_env("DISCORD_WEBHOOK_WATCHLIST")
+    if not url:
+        return {"ok": False, "body": "DISCORD_WEBHOOK_MORNING_BRIEF / DISCORD_WEBHOOK_WATCHLIST 未設定"}
+
+    now_str = datetime.datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    time_line = as_of or now_str
+
+    description_parts = [
+        f"依 **theme.json** 次族群與永豐即時快照，計算各族群**等權重平均漲跌幅**（略過無報價成分）。",
+        f"產出時間：`{time_line}`",
+    ]
+    if error_hint:
+        description_parts.insert(0, f"⚠️ {error_hint}")
+
+    description = "\n".join(description_parts)
+
+    top_block = _fmt_theme_brief_block(
+        top_themes,
+        empty_label="（無）",
+    )
+    bot_block = _fmt_theme_brief_block(
+        bottom_themes,
+        empty_label="（無）",
+    )
+
+    fields: List[Dict[str, Any]] = [
+        {
+            "name":   "📈 漲幅前五族群",
+            "value":  _truncate_field_value(top_block),
+            "inline": False,
+        },
+        {
+            "name":   "📉 跌幅前五族群",
+            "value":  _truncate_field_value(bot_block),
+            "inline": False,
+        },
+    ]
+
+    return await send_discord_alert(
+        webhook_url=url,
+        title="🌅 09:30 早盤族群動能快報",
+        message=description,
+        color=COLOR_INFO,
+        fields=fields,
+        footer="AlphaScan Pro 早盤族群快報",
+    )
+
+
+async def notify_capital_flow_ignites(alerts: List[Dict[str, Any]]) -> Dict:
+    """
+    盤中 5 分鐘族群資金異常（點火）Discord 警報。
+
+    alerts 每筆建議欄位：theme, flow_yi, avg_pct（見 engine_capital_flow.run_capital_flow_tick）。
+    """
+    if not alerts:
+        return {"skipped": True, "reason": "無警報"}
+
+    if not is_capital_flow_notify_enabled():
+        return {"skipped": True, "reason": "DISCORD_NOTIFY_CAPITAL_FLOW 未啟用"}
+
+    url = _get_env("DISCORD_WEBHOOK_CAPITAL_FLOW") or _get_env("DISCORD_WEBHOOK_WATCHLIST")
+    if not url or not url.startswith("http"):
+        return {"ok": False, "body": "DISCORD_WEBHOOK_CAPITAL_FLOW / DISCORD_WEBHOOK_WATCHLIST 未設定"}
+
+    lines: List[str] = []
+    for a in alerts[:20]:
+        name = str(a.get("theme", "?"))
+        fy = a.get("flow_yi", 0)
+        ap = float(a.get("avg_pct", 0) or 0)
+        sym = "▲" if ap >= 0 else "▼"
+        lines.append(
+            f"🔥 **[資金點火]** **{name}** ｜ 5分鐘估算流入 **{fy} 億** ｜ 族群均幅 {sym} **{abs(ap):.2f}%**"
+        )
+    if len(alerts) > 20:
+        lines.append(f"… 其餘 **{len(alerts) - 20}** 族未列出（字數上限）")
+
+    now_str = datetime.datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    description = (
+        "\n".join(lines)
+        + f"\n\n`{now_str}`\n"
+        + "條件：**本段族群增量金額 > 前一段 2 倍** 且 **紅盤占比 ≥ 80%**（見 `engine_capital_flow`）。"
+    )
+
+    return await send_discord_alert(
+        webhook_url=url,
+        title="🔥 盤中資金點火（5 分鐘流量）",
+        message=description,
+        color=COLOR_WARNING,
+        footer="AlphaScan Pro 資金流監控",
     )
 
 

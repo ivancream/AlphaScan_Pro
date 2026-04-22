@@ -56,6 +56,51 @@ def get_active_stocks() -> pd.DataFrame:
         ).df()
 
 
+def get_stock_sector_rows() -> Dict[str, Dict[str, Any]]:
+    """
+    證交所 stock_sectors 全欄：代號 -> {macro, meso, industry_raw}。
+    與資金流向熱力圖板塊來源相同；解析規則見 backend.engines.sector_labels。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        with duck_read() as conn:
+            rows = conn.execute(
+                "SELECT stock_id, macro, meso, industry_raw FROM stock_sectors"
+            ).fetchall()
+        for r in rows:
+            sid = str(r[0]).strip() if r[0] is not None else ""
+            if not sid:
+                continue
+            out[sid] = {
+                "macro": r[1],
+                "meso": r[2],
+                "industry_raw": r[3],
+            }
+    except Exception:
+        return {}
+    return out
+
+
+def resolve_industry_label(
+    stock_id: Any,
+    sector_rows: Dict[str, Dict[str, Any]],
+    tw_codes: Any,
+    *,
+    market: Optional[str] = None,
+    use_yfinance: bool = False,
+) -> str:
+    """選股／自選「產業」：與熱力圖板塊一致；macro 為「其他」時改走 twstock／yfinance。"""
+    from backend.engines.sector_labels import resolve_industry_for_ui
+
+    return resolve_industry_for_ui(
+        stock_id,
+        sector_rows,
+        tw_codes,
+        market=market,
+        use_yfinance=use_yfinance,
+    )
+
+
 def resolve_stock_id(query: str) -> Optional[str]:
     """
     Resolve user input (code or partial name) to a pure stock_id.

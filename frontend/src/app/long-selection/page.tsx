@@ -7,6 +7,13 @@ import { useNavigate } from 'react-router-dom';
 import { ChipsAnalysisWidget } from '@/components/chips/ChipsAnalysisWidget';
 import { TrendingUp, Activity } from 'lucide-react';
 import { cleanStockSymbol, toStockDetailPath } from '@/lib/stocks';
+import { formatTaipeiScanTime, scannerResultsSourceLabel } from '@/lib/scanMeta';
+import {
+    DEFAULT_LONG_SELECTION,
+    DEFAULT_LONG_THRESHOLDS,
+    loadLongSelectionParams,
+    saveLongSelectionParams,
+} from '@/lib/selectionParams';
 
 function formatSwingScanError(err: unknown): string {
     if (isAxiosError(err)) {
@@ -25,6 +32,13 @@ function formatSwingScanError(err: unknown): string {
     }
     if (err instanceof Error) return err.message;
     return String(err);
+}
+
+function formatDdFromHighCell(v: unknown): string {
+    if (v === undefined || v === null || v === '') return '-';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '-';
+    return `${n.toFixed(2)}%`;
 }
 
 type Strategy = 'core_long' | 'wanderer';
@@ -85,16 +99,13 @@ export default function SwingLongPage() {
     const setScanned        = useAppStore((state) => state.setScanned);
     const navigate = useNavigate();
 
-    // UI 篩選（前端即時過濾，不觸發後端重掃）
-    const [longFilters, setLongFilters] = useState({
-        req_ma: true,
-        req_vol: true,
-        req_slope: true
-    });
-    const [wandererFilters, setWandererFilters] = useState({
-        req_slope: true,
-        req_bb_level: true
-    });
+    // UI 篩選（前端即時過濾，不觸發後端重掃）；門檻與勾選可自訂並存於 localStorage
+    const [storedSelection, setStoredSelection] = useState(() => loadLongSelectionParams());
+    const { longFilters, wandererFilters, thresholds } = storedSelection;
+
+    useEffect(() => {
+        saveLongSelectionParams(storedSelection);
+    }, [storedSelection]);
 
     // 後端掃描參數固定為「寬鬆條件」，拿到結果後再由前端 checkbox 過濾
     const longServerParams = { req_ma: false, req_vol: false, req_slope: false };
@@ -136,16 +147,20 @@ export default function SwingLongPage() {
     const filteredResults: ScanRow[] = (scanResults ?? []).filter((item) => {
             if (strategy === 'core_long') {
                 if (longFilters.req_ma && item['均線多排'] !== 'V') return false;
-                // 爆量表態：成交量 > 五日均量的兩倍（量比 > 2）
-                if (longFilters.req_vol && Number(item['量比']) <= 2) return false;
-                // 通道擴張：上軌斜率 > 0（下軌斜率 < 0 由後端核心條件保障）
-                if (longFilters.req_slope && Number(item['上軌斜率']) <= 0) return false;
+                if (longFilters.req_vol && Number(item['量比']) <= thresholds.minVolRatio) return false;
+                if (longFilters.req_slope && Number(item['上軌斜率']) <= thresholds.minUpperBandSlope) return false;
                 return true;
             }
 
             // wanderer
-            if (wandererFilters.req_slope && Number(item['月線斜率(%)']) <= 0.8) return false;
-            if (wandererFilters.req_bb_level && Number(item['布林位階']) >= 4) return false;
+            if (wandererFilters.req_slope && Number(item['月線斜率(%)']) <= thresholds.minMonthlySlopePct) return false;
+            if (wandererFilters.req_bb_level && Number(item['布林位階']) >= thresholds.maxBbLevelExclusive) return false;
+            if (wandererFilters.req_drawdown) {
+                const rawDd = item['自高點下跌(%)'];
+                if (rawDd !== undefined && rawDd !== null && rawDd !== '') {
+                    if (Number(rawDd) < thresholds.minDrawdownFromHighPct) return false;
+                }
+            }
             if (onlyShowDisposition) return Boolean(item.is_disposition);
             return true;
         });
@@ -163,6 +178,15 @@ export default function SwingLongPage() {
             if (valB === 'V') valB = 1;
             else if (valB === '-') valB = 0;
 
+            if (sortConfig.key === '自高點下跌(%)') {
+                const parseDd = (v: unknown) =>
+                    v === undefined || v === null || v === '' || !Number.isFinite(Number(v))
+                        ? Number.NEGATIVE_INFINITY
+                        : Number(v);
+                valA = parseDd(valA);
+                valB = parseDd(valB);
+            }
+
             if (typeof valA === 'string' && typeof valB === 'string') {
                 return sortConfig.direction === 'asc' 
                     ? valA.localeCompare(valB) 
@@ -177,7 +201,11 @@ export default function SwingLongPage() {
             return 0;
         });
     }
-    const latestDataDate = sortedResults[0]?.['資料日期'] ?? '-';
+    const klineRefDate =
+        (sortedResults[0]?.['資料日期'] as string | undefined) ??
+        (scanResults?.[0]?.['資料日期'] as string | undefined) ??
+        '-';
+    const usingSlowPath = slowEnabled && (scanResults?.length ?? 0) > 0;
 
     const cfg = STRATEGY_CONFIG[strategy];
     const btnColor =
@@ -251,7 +279,7 @@ export default function SwingLongPage() {
                     {isLoading ? '核心引擎掃描中...' : `啟動「${cfg.label}」選股`}
                 </button>
                 <p className="text-[10px] text-gray-500 max-w-xs text-right">
-                    提示：全市場篩選約需 1～3 分鐘，請務必先啟動後端 API。
+                    提示：全市場篩選約需 1～3 分鐘；盤中依後端排程與永豐快照更新，為數分鐘級並非逐筆即時。請先啟動後端 API。
                 </p>
                 </div>
             </div>
@@ -277,33 +305,66 @@ export default function SwingLongPage() {
 
             {/* 策略篩選與參數配置 */}
             <div className={`bg-[#161B22] border rounded-xl p-5 space-y-4 ${cfg.color === 'amber' ? 'border-amber-800/40' : 'border-red-800/40'}`}>
-                <div className="flex justify-between items-center border-b border-gray-800 pb-2">
+                <div className="flex flex-wrap justify-between items-center gap-2 border-b border-gray-800 pb-2">
                     <p className={`${cfg.color === 'amber' ? 'text-amber-400' : 'text-red-400'} font-bold text-sm tracking-wider uppercase`}>策略篩選條件 (預設全選)</p>
-                    <span className="text-xs text-gray-500 italic">勾選後將僅顯示符合該條件的標的</span>
+                    <div className="flex flex-wrap items-center gap-3">
+                        <span className="text-xs text-gray-500 italic">勾選後將僅顯示符合該條件的標的</span>
+                        <button
+                            type="button"
+                            onClick={() =>
+                                setStoredSelection({
+                                    ...DEFAULT_LONG_SELECTION,
+                                    thresholds: { ...DEFAULT_LONG_THRESHOLDS },
+                                })
+                            }
+                            className="text-xs text-gray-500 hover:text-white underline-offset-2 hover:underline"
+                        >
+                            重設為預設
+                        </button>
+                    </div>
                 </div>
                 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div
+                    className={`grid grid-cols-1 gap-6 ${
+                        strategy === 'core_long' ? 'md:grid-cols-3' : 'md:grid-cols-2 lg:grid-cols-4'
+                    }`}
+                >
                     {strategy === 'core_long' ? (
                         <>
                             <FilterCheckbox 
                                 label="均線多排" 
                                 checked={longFilters.req_ma} 
-                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_ma: val }))}
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        longFilters: { ...prev.longFilters, req_ma: val },
+                                    }))
+                                }
                                 desc="MA5 > MA10 > MA20"
                                 color="red"
                             />
                             <FilterCheckbox 
                                 label="通道擴張" 
                                 checked={longFilters.req_slope} 
-                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_slope: val }))}
-                                desc="上軌斜率 > 0、下軌斜率 < 0"
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        longFilters: { ...prev.longFilters, req_slope: val },
+                                    }))
+                                }
+                                desc={`上軌斜率 > ${thresholds.minUpperBandSlope}（下軌斜率 < 0 由後端核心條件保障）`}
                                 color="red"
                             />
                             <FilterCheckbox 
                                 label="爆量表態" 
                                 checked={longFilters.req_vol} 
-                                onChange={(val) => setLongFilters(prev => ({ ...prev, req_vol: val }))}
-                                desc="成交量 > 五日均量 × 2"
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        longFilters: { ...prev.longFilters, req_vol: val },
+                                    }))
+                                }
+                                desc={`量比 > ${thresholds.minVolRatio}`}
                                 color="red"
                             />
                         </>
@@ -312,18 +373,151 @@ export default function SwingLongPage() {
                             <FilterCheckbox 
                                 label="月線斜率" 
                                 checked={wandererFilters.req_slope} 
-                                onChange={(val) => setWandererFilters(prev => ({ ...prev, req_slope: val }))}
-                                desc="月線斜率翻揚 > 0.8%"
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        wandererFilters: { ...prev.wandererFilters, req_slope: val },
+                                    }))
+                                }
+                                desc={`月線斜率翻揚 > ${thresholds.minMonthlySlopePct}%`}
                                 color="red"
                             />
                             <FilterCheckbox 
                                 label="布林位階" 
                                 checked={wandererFilters.req_bb_level} 
-                                onChange={(val) => setWandererFilters(prev => ({ ...prev, req_bb_level: val }))}
-                                desc="位階 < 4 (具備均值回歸空間)"
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        wandererFilters: { ...prev.wandererFilters, req_bb_level: val },
+                                    }))
+                                }
+                                desc={`位階 < ${thresholds.maxBbLevelExclusive}（具備均值回歸空間）`}
+                                color="red"
+                            />
+                            <FilterCheckbox 
+                                label="自高點跌幅" 
+                                checked={wandererFilters.req_drawdown} 
+                                onChange={(val) =>
+                                    setStoredSelection((prev) => ({
+                                        ...prev,
+                                        wandererFilters: { ...prev.wandererFilters, req_drawdown: val },
+                                    }))
+                                }
+                                desc={`近10根日K高點回落 ≥ ${thresholds.minDrawdownFromHighPct}%`}
                                 color="red"
                             />
                         </>
+                    )}
+                </div>
+
+                <div className="border-t border-gray-800 pt-4 space-y-3">
+                    <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">自訂數值門檻</p>
+                    {strategy === 'core_long' ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <label className="flex flex-col gap-1.5 text-sm">
+                                <span className="text-gray-400">量比下限（須大於）</span>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    min={0}
+                                    value={thresholds.minVolRatio}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) return;
+                                        setStoredSelection((prev) => ({
+                                            ...prev,
+                                            thresholds: { ...prev.thresholds, minVolRatio: Math.max(0, v) },
+                                        }));
+                                    }}
+                                    className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                                />
+                                <span className="text-[10px] text-gray-600">預設 2（與原「五日均量 × 2」一致）</span>
+                            </label>
+                            <label className="flex flex-col gap-1.5 text-sm">
+                                <span className="text-gray-400">上軌斜率下限（須大於）</span>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    value={thresholds.minUpperBandSlope}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) return;
+                                        setStoredSelection((prev) => ({
+                                            ...prev,
+                                            thresholds: { ...prev.thresholds, minUpperBandSlope: v },
+                                        }));
+                                    }}
+                                    className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                                />
+                                <span className="text-[10px] text-gray-600">預設 0</span>
+                            </label>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <label className="flex flex-col gap-1.5 text-sm">
+                                <span className="text-gray-400">月線斜率下限 %（須大於）</span>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    value={thresholds.minMonthlySlopePct}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) return;
+                                        setStoredSelection((prev) => ({
+                                            ...prev,
+                                            thresholds: { ...prev.thresholds, minMonthlySlopePct: v },
+                                        }));
+                                    }}
+                                    className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                                />
+                                <span className="text-[10px] text-gray-600">預設 0.8</span>
+                            </label>
+                            <label className="flex flex-col gap-1.5 text-sm">
+                                <span className="text-gray-400">布林位階上限（須小於）</span>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    min={0.1}
+                                    value={thresholds.maxBbLevelExclusive}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) return;
+                                        setStoredSelection((prev) => ({
+                                            ...prev,
+                                            thresholds: {
+                                                ...prev.thresholds,
+                                                maxBbLevelExclusive: Math.max(0.1, v),
+                                            },
+                                        }));
+                                    }}
+                                    className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                                />
+                                <span className="text-[10px] text-gray-600">預設 4（排除位階 ≥ 此值）</span>
+                            </label>
+                            <label className="flex flex-col gap-1.5 text-sm">
+                                <span className="text-gray-400">自高點跌幅下限 %（須 ≥）</span>
+                                <input
+                                    type="number"
+                                    step="0.5"
+                                    min={0}
+                                    max={100}
+                                    value={thresholds.minDrawdownFromHighPct}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) return;
+                                        setStoredSelection((prev) => ({
+                                            ...prev,
+                                            thresholds: {
+                                                ...prev.thresholds,
+                                                minDrawdownFromHighPct: Math.min(100, Math.max(0, v)),
+                                            },
+                                        }));
+                                    }}
+                                    className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                                />
+                                <span className="text-[10px] text-gray-600">預設 10（近10根日K最高 vs 收盤）</span>
+                            </label>
+                        </div>
                     )}
                 </div>
             </div>
@@ -331,10 +525,41 @@ export default function SwingLongPage() {
             {/* 掃描結果 */}
             {isActuallyScanned && (
                 <div className="bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-xl">
-                    <div className="flex justify-between items-center bg-[#0E1117] px-6 py-4 border-b border-gray-800">
-                        <div className="flex items-center gap-4">
-                            <h3 className="font-bold text-gray-300">掃描結果 ({filteredResults.length})</h3>
-                            <span className="text-xs text-gray-500">資料日期：{latestDataDate}</span>
+                    <div className="flex justify-between items-start gap-4 bg-[#0E1117] px-6 py-4 border-b border-gray-800">
+                        <div className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4 flex-1 min-w-0">
+                            <div className="flex flex-col gap-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                    <h3 className="font-bold text-gray-300">掃描結果 ({filteredResults.length})</h3>
+                                </div>
+                                <div className="text-[11px] text-gray-500 leading-relaxed space-y-0.5 max-w-3xl">
+                                    <p title="技術指標使用最後一根 K 棒的交易日；盤中快照成功時應為當日日期，非即時報價時間戳。">
+                                        <span className="text-gray-400">K 線基準日</span>：{klineRefDate}
+                                    </p>
+                                    <p>
+                                        {usingSlowPath ? (
+                                            <>
+                                                <span className="text-gray-400">列表來源</span>
+                                                ：全市場掃描（快速路徑尚無資料）
+                                                {fastData?.last_run ? (
+                                                    <>
+                                                        {' '}
+                                                        · <span className="text-gray-400">盤中排程上次完成</span>：
+                                                        {formatTaipeiScanTime(fastData.last_run)}
+                                                    </>
+                                                ) : null}
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span className="text-gray-400">最後掃描（台北）</span>：
+                                                {formatTaipeiScanTime(fastData?.last_run)}
+                                                {' · '}
+                                                <span className="text-gray-400">快取</span>：
+                                                {scannerResultsSourceLabel(fastData?.source)}
+                                            </>
+                                        )}
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                         {strategy === 'wanderer' && (
                             <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer hover:text-white transition">
@@ -429,6 +654,13 @@ export default function SwingLongPage() {
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交量(張)')}>成交量(張){renderSortIcon('成交量(張)')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('月線斜率(%)')}>月線斜率(%){renderSortIcon('月線斜率(%)')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('布林位階')}>布林位階{renderSortIcon('布林位階')}</th>
+                                            <th
+                                                className="px-6 py-4 cursor-pointer hover:text-white"
+                                                title="近10根日K之最高價相對收盤之跌幅(%)"
+                                                onClick={() => handleSort('自高點下跌(%)')}
+                                            >
+                                                自高點下跌{renderSortIcon('自高點下跌(%)')}
+                                            </th>
                                             <th className="px-6 py-4 text-red-400 font-bold cursor-pointer hover:text-red-300" onClick={() => handleSort('處置狀態')}>處置狀態{renderSortIcon('處置狀態')}</th>
                                         </tr>
                                     </thead>
@@ -462,6 +694,7 @@ export default function SwingLongPage() {
                                                 <td className="px-6 py-4 font-mono">{Number(item['成交量(張)']).toLocaleString()}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['月線斜率(%)']).toFixed(1)}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['布林位階']).toFixed(1)}</td>
+                                                <td className="px-6 py-4 font-mono text-amber-200/90">{formatDdFromHighCell(item['自高點下跌(%)'])}</td>
                                                 <td className="px-6 py-4 font-mono">{String(item['處置狀態'] ?? '-')}</td>
                                             </tr>
                                         ))}

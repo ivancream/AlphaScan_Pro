@@ -142,6 +142,51 @@ def _resolve_labels(
     return macro, meso, micros
 
 
+def _merge_sinopac_snapshot_prices(stocks: list) -> bool:
+    """
+    以永豐 snapshots 覆寫當前列的價量與漲跌幅，使資金流向頁與盤中報價一致。
+    失敗時靜默回傳 False（仍使用 DuckDB 列）。
+    """
+    from backend.settings import sinopac_credentials_configured
+    from backend.engines.sinopac_session import sinopac_session
+
+    if not stocks or not sinopac_credentials_configured():
+        return False
+    if not sinopac_session.is_connected:
+        sinopac_session.connect()
+    if not sinopac_session.is_connected:
+        return False
+
+    ids = list(dict.fromkeys(str(s["ticker"]).strip() for s in stocks if s.get("ticker")))
+    if not ids:
+        return False
+
+    ohlcv = sinopac_session.get_ohlcv_map(ids)
+    if not ohlcv:
+        return False
+
+    applied = False
+    for r in stocks:
+        sid = str(r.get("ticker", "")).strip()
+        if sid not in ohlcv:
+            continue
+        snap = ohlcv[sid]
+        cl = float(snap["Close"])
+        vol_sh = float(snap["Volume"])
+        r["close"] = round(cl, 2)
+        r["change_pct"] = round(float(snap["ChangeRate"]), 2)
+        r["volume"] = int(vol_sh / 1000)
+        r["turnover"] = int(cl * vol_sh)
+        basis = r.get("change_pct_basis")
+        if basis in ("intraday", "unreliable", "no_reference"):
+            del r["change_pct_basis"]
+        elif basis == "no_volume":
+            r.pop("change_pct_basis", None)
+        applied = True
+
+    return applied
+
+
 def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
     if not DUCKDB_PATH.exists():
         return {
@@ -278,13 +323,14 @@ def get_heatmap_data(metric: str = "change_pct") -> Dict[str, Any]:
 
         stocks.append(row)
 
+    merge_ok = _merge_sinopac_snapshot_prices(stocks)
     stocks.sort(key=lambda s: s["turnover"], reverse=True)
     return {
         "date": latest_date,
         "as_of_date": latest_date,
-        "data_freshness": "daily_snapshot",
-        # 供前端／除錯確認：價量來自庫表，非即時逐檔 API
-        "price_source": "duckdb_daily_prices",
+        "data_freshness": "sinopac_intraday" if merge_ok else "daily_snapshot",
+        # 供前端／除錯：成功合併時價量為當下 requests 之永豐快照
+        "price_source": "duckdb_daily_prices+sinopac_snapshot" if merge_ok else "duckdb_daily_prices",
         "ingest_path": "scheduler_intraday_batch",
         # theme.json 題材表內有標籤的代號數（其餘在族群視野列為（未分類））
         "theme_micro_ticker_count": len(theme_lists),

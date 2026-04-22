@@ -54,15 +54,16 @@ async def get_watchlist_api():
     for _, row in price_df.iterrows():
         price_map[row["stock_id"]] = row
 
+    sector_rows = queries.get_stock_sector_rows()
     try:
         import twstock
         tw_codes = twstock.codes
     except Exception:
         tw_codes = {}
 
+    info = queries.get_stock_info_df()
     results = []
     for sid in stock_ids:
-        info = queries.get_stock_info_df()
         name_row = info[info["stock_id"] == sid] if not info.empty else None
         name = name_row.iloc[0]["name"] if name_row is not None and not name_row.empty else sid
         market = name_row.iloc[0]["market"] if name_row is not None and not name_row.empty else "TSE"
@@ -78,7 +79,13 @@ async def get_watchlist_api():
             change_pct = round(((close - prev_close) / prev_close) * 100, 2)
 
         suffix = ".TWO" if market == "OTC" else ".TW"
-        industry = getattr(tw_codes.get(sid), "group", "其他") if tw_codes.get(sid) else "其他"
+        industry = queries.resolve_industry_label(
+            sid,
+            sector_rows,
+            tw_codes,
+            market=market,
+            use_yfinance=True,
+        )
 
         results.append({
             "代號": sid,

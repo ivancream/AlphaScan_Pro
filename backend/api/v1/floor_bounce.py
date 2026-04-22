@@ -52,7 +52,19 @@ async def scan_floor_bounce(
         raise HTTPException(status_code=500, detail=f"Failed to read stock list: {exc}")
 
     results = []
-    
+
+    sector_rows = _db_queries.get_stock_sector_rows()
+    try:
+        import twstock
+        _tw_codes_fb = twstock.codes
+    except Exception:
+        _tw_codes_fb = {}
+
+    mkt_by_sid: Dict[str, str] = {}
+    if not info_df.empty and "market" in info_df.columns:
+        for _, r in info_df.iterrows():
+            mkt_by_sid[str(r["stock_id"]).strip()] = str(r.get("market") or "")
+
     # 限制掃描數量以避免 API time out (正式環境可用背景任務)
     for stock_id in stocks:
         df = fetch_stock_data(stock_id)
@@ -103,13 +115,12 @@ async def scan_floor_bounce(
         if require_vol:
              if daily_ret < 0 and vol_ratio < 2.0: continue
 
-        # 取得產業分類
-        try:
-            import twstock
-            tw_codes = twstock.codes
-            industry = getattr(tw_codes.get(stock_id), "group", "其他") if tw_codes.get(stock_id) else "其他"
-        except:
-            industry = "其他"
+        industry = _db_queries.resolve_industry_label(
+            stock_id,
+            sector_rows,
+            _tw_codes_fb,
+            market=mkt_by_sid.get(str(stock_id).strip()),
+        )
 
         results.append({
             "id": stock_id,

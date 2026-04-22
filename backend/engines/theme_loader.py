@@ -36,6 +36,44 @@ def _theme_tags_from_json_value(v: Any) -> list[str]:
     return [t] if t else []
 
 
+def load_theme_catalog_theme_to_stocks() -> dict[str, list[str]]:
+    """
+    theme.json：{ "題材名": ["2330", ...] } -> { "題材名": ["2330", ...] }（去重、保序）。
+    供族群動能快報等需「依題材鍵聚合成分股」的用途；與 load_theme_catalog_stock_tags 互為反轉視角。
+    """
+    if not THEME_CATALOG_JSON.exists():
+        return {}
+    try:
+        raw = THEME_CATALOG_JSON.read_text(encoding="utf-8")
+        if raw.startswith("\ufeff"):
+            raw = raw[1:]
+        data = json.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, list[str]] = {}
+        for theme_name, tickers in data.items():
+            tname = str(theme_name).strip()
+            if not tname or not isinstance(tickers, list):
+                continue
+            seen: set[str] = set()
+            ids: list[str] = []
+            for tid in tickers:
+                if tid is None:
+                    continue
+                sid = str(tid).strip()
+                if not sid.isdigit():
+                    continue
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                ids.append(sid)
+            if ids:
+                out[tname] = ids
+        return out
+    except Exception:
+        return {}
+
+
 def load_theme_catalog_stock_tags() -> dict[str, list[str]]:
     """
     theme.json：{ "題材名": ["2330", ...] } -> { "2330": ["題材A", "題材B"], ... }。

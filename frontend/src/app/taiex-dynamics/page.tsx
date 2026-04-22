@@ -89,7 +89,28 @@ export default function TaiexDynamicsPage() {
             大盤氣氛
           </h1>
           <p className="text-sm text-gray-500 mt-2 max-w-2xl">
-            加權指數、台指期與主要權值股一次呈現，快速判斷多空與期現結構。漲跌以日線收盤為主、走勢圖為近數日分鐘線；權重與貢獻度為近似值。
+            加權指數、台指期與主要權值股一次呈現，快速判斷多空與期現結構。
+            {data ? (
+              data.data_source === 'sinopac' ? (
+                <>
+                  表頭數字為
+                  <span className="text-cyan-300/90"> 永豐 Shioaji 盤中 snapshots</span>
+                  （加權 TSE001、TXF 近月、權值股批次）。
+                  {data.series_source === 'yfinance' ? (
+                    <> 下方走勢小圖仍為 Yahoo 1 分鐘線輔助，可能與表頭有短暫時間差。</>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  目前為 Yahoo Finance 降級（常見延遲）；表頭漲跌多為
+                  <span className="text-gray-400"> 日線相對前一日</span>
+                  。請確認 .env 已設定 SINOPAC_API_KEY／SECRET 並重啟後端以使用永豐盤中。
+                </>
+              )
+            ) : (
+              <span className="text-gray-600">載入摘要中…</span>
+            )}{' '}
+            權重與貢獻度為近似值。
           </p>
         </div>
         <div className="flex flex-col items-start lg:items-end gap-2">
