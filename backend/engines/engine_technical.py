@@ -1,6 +1,7 @@
 # engine_technical.py
 import os
 from datetime import date, timedelta
+import math
 import pandas as pd
 import numpy as np
 import google.generativeai as genai
@@ -272,6 +273,10 @@ class BollingerStrategy:
             df['MA20'] = ta.sma(df['Close'], length=20)
             df['MA60'] = ta.sma(df['Close'], length=60)
             df['MA120'] = ta.sma(df['Close'], length=120)
+
+            # 量能均線：不依賴 bbands 是否成功，避免布林計算失敗時無法得到 20MA 量比
+            df['Volume_MA5'] = ta.sma(df['Volume'], length=5)
+            df['Volume_MA20'] = ta.sma(df['Volume'], length=20)
             
             bbands = ta.bbands(df['Close'], length=20, std=2)
             if bbands is not None and not bbands.empty:
@@ -283,12 +288,11 @@ class BollingerStrategy:
                 df['Lower'] = bbands[lower_col]
                 
                 df['Bandwidth_Pct'] = (df['Upper'] - df['Lower']) / df['MA20'] * 100
-                df['Volume_MA5'] = ta.sma(df['Volume'], length=5)
             else:
-                for col in ['Upper', 'Lower', 'Bandwidth_Pct', 'Volume_MA5']:
+                for col in ['Upper', 'Lower', 'Bandwidth_Pct']:
                     df[col] = np.nan
         except Exception:
-            for col in ['Upper', 'Lower', 'Bandwidth_Pct', 'Volume_MA5', 'MA5', 'MA10', 'MA20', 'MA60', 'MA120']:
+            for col in ['Upper', 'Lower', 'Bandwidth_Pct', 'Volume_MA5', 'Volume_MA20', 'MA5', 'MA10', 'MA20', 'MA60', 'MA120']:
                 df[col] = np.nan
         return df
 
@@ -321,7 +325,7 @@ class BollingerStrategy:
     @classmethod
     def analyze_from_computed(cls, df, upper_slope_threshold=0.003, vol_surge_multiplier=1.5):
         """Judgment logic only — assumes df already has indicator columns."""
-        required_cols = ['Upper', 'Lower', 'MA20', 'Bandwidth_Pct', 'Volume_MA5']
+        required_cols = ['Upper', 'Lower', 'MA20', 'Bandwidth_Pct', 'Volume']
         if df is None or not all(col in df.columns for col in required_cols) or len(df) < 2:
             return False, {}, df
             
@@ -349,8 +353,22 @@ class BollingerStrategy:
         ma20_slope_pct = ma20_slope_raw * 100
 
         is_red = today['Close'] > today['Open']
-        vol_ratio = today['Volume'] / today['Volume_MA5'] if today['Volume_MA5'] > 0 else 0
-        is_vol_surge = vol_ratio > vol_surge_multiplier
+        # 以最近 5／20 根 K 的成交量算均量倍率（與 ta.sma 最後值一致，且不依賴指標欄是否為 NaN）
+        vol_s = pd.to_numeric(df['Volume'], errors='coerce')
+        last_vol = float(vol_s.iloc[-1]) if len(vol_s) and pd.notna(vol_s.iloc[-1]) else 0.0
+        tail5 = vol_s.iloc[-5:]
+        tail20 = vol_s.iloc[-20:]
+        m5_raw = tail5.mean()
+        m20_raw = tail20.mean()
+        ma5_vol = float(m5_raw) if len(tail5) and pd.notna(m5_raw) else 0.0
+        ma20_vol = float(m20_raw) if len(tail20) and pd.notna(m20_raw) else 0.0
+        vol_ratio_ma5 = (last_vol / ma5_vol) if ma5_vol > 0 else 0.0
+        vol_ratio_ma20 = (last_vol / ma20_vol) if ma20_vol > 0 else 0.0
+        if not math.isfinite(vol_ratio_ma5):
+            vol_ratio_ma5 = 0.0
+        if not math.isfinite(vol_ratio_ma20):
+            vol_ratio_ma20 = 0.0
+        is_vol_surge = vol_ratio_ma5 > vol_surge_multiplier
         
         pos_upper = (today['Close'] / today['Upper']) * 100
         is_touching = pos_upper >= 99.0
@@ -377,7 +395,9 @@ class BollingerStrategy:
             "Bandwidth_Chg": round(bw_change, 1),
             "Upper_Slope_Pct": round(upper_slope_pct, 2),
             "MA20_Slope_Pct": round(ma20_slope_pct, 2),
-            "Vol_Ratio": round(vol_ratio, 1),
+            "Vol_Ratio": round(vol_ratio_ma5, 1),
+            "5MA量比": round(vol_ratio_ma5, 1),
+            "20MA量比": round(vol_ratio_ma20, 2),
             "Pos_Upper": round(pos_upper, 1),
             "Is_Red": is_red,
             "Details": {
@@ -619,7 +639,8 @@ class BollingerStrategy:
                     "月線斜率": q_data["MA20_Slope_Pct"],
                     "上軌斜率": q_data["Upper_Slope_Pct"],
                     "帶寬增長(%)": q_data["Bandwidth_Chg"],
-                    "量比": q_data["Vol_Ratio"],
+                    "5MA量比": q_data.get("5MA量比", q_data["Vol_Ratio"]),
+                    "20MA量比": q_data.get("20MA量比", 0),
                     "資料日期": data_date,
                     "上軌乖離(%)": q_data["Pos_Upper"],
                     "_ticker": real_ticker,

@@ -46,7 +46,7 @@ def stream_analyze_chips_image(uploaded_files: List[Any], stock_symbol: str, tec
         * 布林帶寬變動: {tech_data.get('Bandwidth_Chg', 'N/A')}%
         * 上軌斜率: {tech_data.get('Upper_Slope_Pct', tech_data.get('Slope_Pct', 'N/A'))}%
         * 月線斜率: {tech_data.get('MA20_Slope_Pct', 'N/A')}%
-        * 成交量比: {tech_data.get('Vol_Ratio', 'N/A')}倍
+        * 成交量比: {tech_data.get('Vol_Ratio', tech_data.get('5MA量比', tech_data.get('量比', 'N/A')))}倍
         * 上軌位置: {tech_data.get('Pos_Upper', 'N/A')}%
         """
         if is_short:
@@ -101,7 +101,7 @@ def analyze_chips_image(uploaded_files: List[Any], stock_symbol: str, tech_data:
         * 布林帶寬變動: {tech_data.get('Bandwidth_Chg', 'N/A')}%
         * 上軌斜率: {tech_data.get('Upper_Slope_Pct', tech_data.get('Slope_Pct', 'N/A'))}%
         * 月線斜率: {tech_data.get('MA20_Slope_Pct', 'N/A')}%
-        * 成交量比: {tech_data.get('Vol_Ratio', 'N/A')}倍
+        * 成交量比: {tech_data.get('Vol_Ratio', tech_data.get('5MA量比', tech_data.get('量比', 'N/A')))}倍
         * 上軌位置: {tech_data.get('Pos_Upper', 'N/A')}%
         """
         # 根據模式選擇提示詞

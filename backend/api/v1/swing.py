@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 from engines.engine_intraday_scanner import (
     _SCAN_CACHE,
     _run_scan as _intraday_run_scan,
+    enrich_long_rows_volume_ma_ratios,
     get_last_signals_from_db,
 )
 from backend.engines.cache_store import StaticCache, TTL_12H
@@ -51,6 +52,13 @@ def _finalize_wanderer_results(items: List[Dict]) -> List[Dict]:
     return out
 
 
+def _finalize_long_results(items: List[Dict]) -> List[Dict]:
+    """淺拷貝後補算 5MA／20MA 量比（舊 StaticCache／舊 DB 相容）。"""
+    out = [dict(r) for r in items]
+    enrich_long_rows_volume_ma_ratios(out)
+    return out
+
+
 # ── 多方布林突破 ───────────────────────────────────────────────────────────────
 
 @router.get("/api/v1/swing/long", response_model=ScanTargetResponse)
@@ -71,20 +79,21 @@ async def scan_swing_long(
     if cached is not None:
         response.headers["Cache-Control"] = _CACHE_CONTROL
         response.headers["X-Cache"] = "HIT"
-        return {"results": cached, "cached": True, "source": "static_cache"}
+        return {"results": _finalize_long_results(cached), "cached": True, "source": "static_cache"}
 
     # ── 路徑 2：盤中排程快取 _SCAN_CACHE ────────────────────────────────────
     intraday = _get_intraday("long")
     if intraday:
-        StaticCache.set(key, intraday, ttl=TTL_12H)
+        finalized = _finalize_long_results(intraday)
+        StaticCache.set(key, finalized, ttl=TTL_12H)
         response.headers["Cache-Control"] = _CACHE_CONTROL
         response.headers["X-Cache"] = "HIT"
-        return {"results": intraday, "cached": True, "source": "intraday_cache"}
+        return {"results": finalized, "cached": True, "source": "intraday_cache"}
 
     # ── 路徑 3：非阻塞回應，掃描改背景預熱（避免 API 逾時） ────────────────
     background_tasks.add_task(_maybe_warm_scanner)
     try:
-        results = _strip_private(get_last_signals_from_db("long", limit=500))
+        results = _finalize_long_results(_strip_private(get_last_signals_from_db("long", limit=500)))
         if results:
             StaticCache.set(key, results, ttl=TTL_12H)
         response.headers["Cache-Control"] = _CACHE_CONTROL

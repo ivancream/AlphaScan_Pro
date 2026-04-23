@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import math
 import os
 import threading
 import time
@@ -167,6 +168,66 @@ def _compute_new_triggers_wanderer(
 
 
 # ── 輔助函式 ─────────────────────────────────────────────────────────────────
+
+def _long_row_needs_volume_ma_enrich(row: Dict) -> bool:
+    """舊快取／舊 DB 列可能缺 20MA 量比或為無法解析的值。"""
+    v = row.get("20MA量比")
+    if v is None or v == "":
+        return True
+    try:
+        float(v)
+        return False
+    except (TypeError, ValueError):
+        return True
+
+
+def enrich_long_rows_volume_ma_ratios(rows: List[Dict]) -> None:
+    """
+    以 DuckDB 日量補算 5MA／20MA 量比（就地修改列）。
+    不覆寫已存在且為有限數值的 20MA量比。
+    """
+    if not rows:
+        return
+    targets = [r for r in rows if _long_row_needs_volume_ma_enrich(r)]
+    if not targets:
+        return
+    ids: List[str] = []
+    seen: Set[str] = set()
+    for r in targets:
+        sid = str(r.get("代號", "")).strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    if not ids:
+        return
+    try:
+        vol_df = _db_queries.get_volume_history_for_stocks(ids, days=120)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Scanner] enrich_long_rows_volume_ma_ratios: {exc}")
+        return
+    if vol_df is None or vol_df.empty:
+        return
+    by_sid: Dict[str, List[float]] = {}
+    for sid, grp in vol_df.groupby("stock_id"):
+        vals = pd.to_numeric(grp["volume"], errors="coerce").dropna().tolist()
+        by_sid[str(sid).strip()] = [float(x) for x in vals]
+    for r in targets:
+        sid = str(r.get("代號", "")).strip()
+        s2 = by_sid.get(sid)
+        if not s2 or len(s2) < 1:
+            continue
+        last_v = float(s2[-1])
+        w5 = s2[-5:] if len(s2) >= 5 else s2
+        w20 = s2[-20:] if len(s2) >= 20 else s2
+        m5 = sum(w5) / len(w5)
+        m20 = sum(w20) / len(w20)
+        r5 = (last_v / m5) if m5 > 0 else 0.0
+        r20 = (last_v / m20) if m20 > 0 else 0.0
+        if math.isfinite(r5):
+            r["5MA量比"] = round(r5, 1)
+        if math.isfinite(r20):
+            r["20MA量比"] = round(r20, 2)
+
 
 def _is_market_hours() -> bool:
     """判斷現在是否在台股盤中時段（09:00～13:35，不含六日）。"""
@@ -397,7 +458,8 @@ def _analyze_single_stock(payload: Dict) -> Optional[Dict]:
                     "月線斜率":     q_long.get("MA20_Slope_Pct", 0),
                     "上軌斜率":     q_long.get("Upper_Slope_Pct", 0),
                     "帶寬增長(%)":  q_long.get("Bandwidth_Chg", 0),
-                    "量比":         q_long.get("Vol_Ratio", 0),
+                    "5MA量比":      q_long.get("5MA量比", q_long.get("Vol_Ratio", 0)),
+                    "20MA量比":     q_long.get("20MA量比", 0),
                     "上軌乖離(%)":  q_long.get("Pos_Upper", 0),
                     "_q_data":      q_long,
                 }
@@ -748,6 +810,8 @@ def get_scan_results(strategy: str = "long") -> List[Dict]:
         {k: v for k, v in item.items() if not k.startswith("_")}
         for item in items
     ]
+    if strategy == "long":
+        enrich_long_rows_volume_ma_ratios(out)
     if strategy == "wanderer":
         enrich_scan_rows_disposition(out)
     return out
@@ -758,6 +822,8 @@ def get_last_signals_from_db(strategy: str = "long", limit: int = 200) -> List[D
     從 user.db intraday_signals 讀取最近一次掃描結果（記憶體快取為空時的備援）。
     """
     out = get_latest_signals(strategy, limit)
+    if strategy == "long":
+        enrich_long_rows_volume_ma_ratios(out)
     if strategy == "wanderer":
         enrich_scan_rows_disposition(out)
     return out

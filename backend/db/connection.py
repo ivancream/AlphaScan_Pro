@@ -97,6 +97,36 @@ def _migrate_duckdb_stock_sectors(conn: duckdb.DuckDBPyConnection) -> None:
         print(f"[DB] stock_sectors migration non-fatal: {exc!s:.120}")
 
 
+def _migrate_duckdb_correlations(conn: duckdb.DuckDBPyConnection) -> None:
+    """為 correlations 補上雙刀戰法衍生欄位（舊版 DuckDB 相容）。"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'main' AND table_name = 'correlations'
+            """
+        ).fetchall()
+        have = {r[0].lower() for r in rows}
+        if "adf_p_value" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN adf_p_value DOUBLE")
+        if "half_life" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN half_life DOUBLE")
+        if "ratio_mean" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN ratio_mean DOUBLE")
+        if "ratio_std" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN ratio_std DOUBLE")
+        if "zero_crossings" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN zero_crossings INTEGER")
+        if "hedge_ratio" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN hedge_ratio DOUBLE")
+        if "eg_p_value" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN eg_p_value DOUBLE")
+        if "composite_score" not in have:
+            conn.execute("ALTER TABLE correlations ADD COLUMN composite_score DOUBLE")
+    except Exception as exc:
+        print(f"[DB] correlations migration non-fatal: {exc!s:.120}")
+
+
 def init_duckdb() -> None:
     """Initialize DuckDB schema; keeps one global connection for the process."""
     DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +135,7 @@ def init_duckdb() -> None:
         _exec_ddl(conn, DUCKDB_DDL)
         _exec_ddl(conn, DUCKDB_COMPAT_VIEWS)
         _migrate_duckdb_stock_sectors(conn)
+        _migrate_duckdb_correlations(conn)
         conn.commit()
     print(f"[DB] DuckDB initialized at {DUCKDB_PATH}")
 

@@ -15,6 +15,14 @@ if not exist "%ROOT%\.venv\Scripts\activate.bat" (
     exit /b 1
 )
 
+echo [INFO] Syncing backend dependencies ...
+call "%ROOT%\.venv\Scripts\python.exe" -m pip install -r "%ROOT%\backend\requirements.txt"
+if errorlevel 1 (
+    echo [ERROR] Failed to install backend dependencies.
+    pause
+    exit /b 1
+)
+
 where npm >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] npm not found. Install Node.js from https://nodejs.org/

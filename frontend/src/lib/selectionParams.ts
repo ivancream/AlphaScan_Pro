@@ -6,7 +6,7 @@ const LS_LONG = 'alphascan.selection.long.v1';
 const LS_SHORT = 'alphascan.selection.short.v1';
 
 export type LongThresholds = {
-    /** 爆量表態：量比須大於此值（原預設 2） */
+    /** 爆量表態：5MA量比須大於此值（原預設 2） */
     minVolRatio: number;
     /** 通道擴張：上軌斜率須大於此值（原預設 0） */
     minUpperBandSlope: number;

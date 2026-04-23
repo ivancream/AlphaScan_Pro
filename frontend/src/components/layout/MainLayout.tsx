@@ -12,6 +12,7 @@ import {
     Landmark,
     CandlestickChart,
     LineChart,
+    Target,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '@/store/useAppStore';
@@ -50,6 +51,7 @@ const NAV_GROUPS: NavGroup[] = [
         separated: true,
         items: [
             { href: '/double-sword', icon: <GitMerge size={18} />, label: '雙刀戰法' },
+            { href: '/warrant-selection', icon: <Target size={18} />, label: '權證挑選' },
             { href: '/dividends', icon: <Landmark size={18} />, label: '除權息' },
             { href: '/cb-bond', icon: <CandlestickChart size={18} />, label: '可轉債' },
         ],

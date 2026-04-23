@@ -41,6 +41,21 @@ function formatDdFromHighCell(v: unknown): string {
     return `${n.toFixed(2)}%`;
 }
 
+/** 量比欄位：舊快取可能僅有「量比」（等同 5 日均量倍率） */
+function formatVolMaRatioCell(item: ScanRow, key: '5MA量比' | '20MA量比'): string {
+    const decimals = key === '5MA量比' ? 1 : 2;
+    const primary = item[key];
+    if (primary !== undefined && primary !== null && primary !== '') {
+        const n = Number(primary);
+        if (Number.isFinite(n)) return n.toFixed(decimals);
+    }
+    if (key === '5MA量比') {
+        const fb = Number(item['量比']);
+        if (Number.isFinite(fb)) return fb.toFixed(1);
+    }
+    return '-';
+}
+
 type Strategy = 'core_long' | 'wanderer';
 
 type ScanRow = Record<string, string | number | boolean | null | undefined> & {
@@ -147,7 +162,10 @@ export default function SwingLongPage() {
     const filteredResults: ScanRow[] = (scanResults ?? []).filter((item) => {
             if (strategy === 'core_long') {
                 if (longFilters.req_ma && item['均線多排'] !== 'V') return false;
-                if (longFilters.req_vol && Number(item['量比']) <= thresholds.minVolRatio) return false;
+                if (longFilters.req_vol) {
+                    const vol5 = Number(item['5MA量比'] ?? item['量比']);
+                    if (!Number.isFinite(vol5) || vol5 <= thresholds.minVolRatio) return false;
+                }
                 if (longFilters.req_slope && Number(item['上軌斜率']) <= thresholds.minUpperBandSlope) return false;
                 return true;
             }
@@ -185,6 +203,25 @@ export default function SwingLongPage() {
                         : Number(v);
                 valA = parseDd(valA);
                 valB = parseDd(valB);
+            }
+
+            if (sortConfig.key === '5MA量比') {
+                const parse5ma = (row: ScanRow) => {
+                    const v = row['5MA量比'] ?? row['量比'];
+                    return v === undefined || v === null || v === '' || !Number.isFinite(Number(v))
+                        ? Number.NEGATIVE_INFINITY
+                        : Number(v);
+                };
+                valA = parse5ma(a);
+                valB = parse5ma(b);
+            }
+            if (sortConfig.key === '20MA量比') {
+                const parse20ma = (v: unknown) =>
+                    v === undefined || v === null || v === '' || !Number.isFinite(Number(v))
+                        ? Number.NEGATIVE_INFINITY
+                        : Number(v);
+                valA = parse20ma(valA);
+                valB = parse20ma(valB);
             }
 
             if (typeof valA === 'string' && typeof valB === 'string') {
@@ -364,7 +401,7 @@ export default function SwingLongPage() {
                                         longFilters: { ...prev.longFilters, req_vol: val },
                                     }))
                                 }
-                                desc={`量比 > ${thresholds.minVolRatio}`}
+                                desc={`5MA量比 > ${thresholds.minVolRatio}`}
                                 color="red"
                             />
                         </>
@@ -415,7 +452,7 @@ export default function SwingLongPage() {
                     {strategy === 'core_long' ? (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <label className="flex flex-col gap-1.5 text-sm">
-                                <span className="text-gray-400">量比下限（須大於）</span>
+                                <span className="text-gray-400">5MA量比下限（須大於）</span>
                                 <input
                                     type="number"
                                     step="0.1"
@@ -431,7 +468,7 @@ export default function SwingLongPage() {
                                     }}
                                     className="bg-[#0E1117] border border-gray-700 rounded-lg px-3 py-2 text-white font-mono text-sm focus:ring-1 focus:ring-red-500 focus:border-red-500"
                                 />
-                                <span className="text-[10px] text-gray-600">預設 2（與原「五日均量 × 2」一致）</span>
+                                <span className="text-[10px] text-gray-600">預設 2（當日量 ÷ 近 5 日均量）</span>
                             </label>
                             <label className="flex flex-col gap-1.5 text-sm">
                                 <span className="text-gray-400">上軌斜率下限（須大於）</span>
@@ -603,7 +640,8 @@ export default function SwingLongPage() {
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('成交量(張)')}>成交量(張){renderSortIcon('成交量(張)')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('月線斜率')}>月線斜率%{renderSortIcon('月線斜率')}</th>
                                             <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('上軌斜率')}>上軌斜率%{renderSortIcon('上軌斜率')}</th>
-                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('量比')}>量比{renderSortIcon('量比')}</th>
+                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('5MA量比')}>5MA量比{renderSortIcon('5MA量比')}</th>
+                                            <th className="px-6 py-4 cursor-pointer hover:text-white" onClick={() => handleSort('20MA量比')}>20MA量比{renderSortIcon('20MA量比')}</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-800">
@@ -636,7 +674,8 @@ export default function SwingLongPage() {
                                                 <td className="px-6 py-4 font-mono">{Number(item['成交量(張)']).toLocaleString()}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['月線斜率']).toFixed(1)}</td>
                                                 <td className="px-6 py-4 font-mono">{Number(item['上軌斜率']).toFixed(1)}</td>
-                                                <td className="px-6 py-4 font-mono">{Number(item['量比']).toFixed(1)}</td>
+                                                <td className="px-6 py-4 font-mono">{formatVolMaRatioCell(item, '5MA量比')}</td>
+                                                <td className="px-6 py-4 font-mono">{formatVolMaRatioCell(item, '20MA量比')}</td>
                                             </tr>
                                         ))}
                                     </tbody>

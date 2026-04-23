@@ -3,46 +3,24 @@ import { LoadingState } from '@/components/ui/LoadingState';
 import { GitMerge, ArrowLeftRight, TrendingUp, TrendingDown } from 'lucide-react';
 
 import { API_V1_BASE } from '@/lib/apiBase';
+import { QuantMetricsPanel } from '@/components/double-sword/QuantMetricsPanel';
+import type { CorrelationSpreadPoint, CorrelationSpreadResponse, TopCorrelationResult } from '@/types';
 
 // ── 型別定義 ──────────────────────────────────────────────
-interface CorrelationResult {
-  rank: number;
-  peer_id: string;
-  peer_name: string;
-  correlation: number;
-  current_z_score?: number; // ← 新增：當前 Z-Score
-}
+type CorrelationResult = TopCorrelationResult;
 
 interface CorrelationResponse {
   stock_id: string;
   stock_name: string;
   calc_date: string;
   lookback_days: number;
+  /** 僅 Pearson、未經雙刀 ADF/EG 建置表 */
+  pearson_only?: boolean;
   results: CorrelationResult[];
 }
 
-interface SpreadPoint {
-  date: string;
-  close_a: number;
-  close_b: number;
-  ratio: number;
-  z_score: number;
-  above_mean: boolean;
-  above_recent: boolean;
-}
-
-interface SpreadResponse {
-  stock_a: string;
-  stock_a_name: string;
-  stock_b: string;
-  stock_b_name: string;
-  days: number;
-  recent_days: number;
-  ratio_mean_full: number;
-  ratio_std_full: number;
-  ratio_mean_recent: number;
-  series: SpreadPoint[];
-}
+type SpreadPoint = CorrelationSpreadPoint;
+type SpreadResponse = CorrelationSpreadResponse;
 
 // 相關係數的顏色判斷
 function corrColor(corr: number): string {
@@ -388,6 +366,16 @@ export default function CorrelationPage() {
                 </div>
               </div>
 
+              {data.pearson_only && (
+                <div className="rounded-xl border border-amber-600/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100/90">
+                  此檔尚未寫入雙刀配對庫（或無通過 ADF／EG 篩選），以下為即時以日線報酬計算之{' '}
+                  <strong>Pearson 相關係數</strong>
+                  （共同交易日 ≥ {data.lookback_days}）。表格內 <strong>最新 Z-Score</strong> 與{' '}
+                  <strong>比值 mean／std</strong> 係依近 {data.lookback_days} 日收盤價比值即時推算；若該配對另通過
+                  ADF／EG 檢定，會一併顯示半衰期、綜合分等欄位。
+                </div>
+              )}
+
               <div className="bg-[#161B22] border border-gray-800 rounded-xl overflow-hidden shadow-2xl">
                 <div className="p-4 bg-[#1C2128] border-b border-gray-800 flex items-center gap-2">
                   <GitMerge size={18} stroke="#F9A825" />
@@ -554,6 +542,8 @@ export default function CorrelationPage() {
 
           {spreadData && latestSpread && (
             <div className="space-y-5">
+              <QuantMetricsPanel {...spreadData} />
+
               {/* 摘要卡片 */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-[#161B22] border border-gray-800 rounded-xl p-4">

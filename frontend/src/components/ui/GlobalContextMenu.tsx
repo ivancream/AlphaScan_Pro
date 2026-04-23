@@ -80,6 +80,18 @@ export const GlobalContextMenu = () => {
                 <Star size={16} className="text-[#EAB308]" />
                 <span className="font-medium">加入自選股</span>
             </button>
+            <button
+                type="button"
+                onClick={() => {
+                    const sym = cleanStockSymbol(contextMenu.symbol as string);
+                    navigate(`/warrant-selection?symbol=${encodeURIComponent(sym)}`);
+                    closeContextMenu();
+                }}
+                className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-[#1E293B] hover:text-cyan-300 flex items-center gap-2.5 transition-colors"
+            >
+                <span className="text-cyan-300">🔍</span>
+                <span className="font-medium">尋找權證 (Find Warrants)</span>
+            </button>
         </div>
     );
 };

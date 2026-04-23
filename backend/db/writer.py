@@ -6,9 +6,10 @@ serialized with RLock) and auto-commits on success / rolls back on failure.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from .connection import duck_write
@@ -208,20 +209,44 @@ def upsert_tdcc(df: pd.DataFrame) -> int:
 def upsert_correlations(df: pd.DataFrame, calc_date: str) -> int:
     """
     Full replace of correlations table.
-    df must have: stock_id, peer_id, correlation
+    df must have: stock_id, peer_id, correlation（可為空 DataFrame，仍會清空舊表並更新 meta）
+    Optional: adf_p_value, eg_p_value, half_life, ratio_mean, ratio_std,
+    zero_crossings, hedge_ratio, composite_score
+    （舊遷移腳本未帶欄位時自動補 NULL / 0）
     """
-    if df is None or df.empty:
+    if df is None:
         return 0
-    df = df.copy()
-    df["calc_date"] = calc_date
     with duck_write() as conn:
         conn.execute("DELETE FROM correlations")
-        conn.execute(
-            """
-            INSERT INTO correlations (stock_id, peer_id, correlation, calc_date)
-            SELECT stock_id, peer_id, correlation, calc_date::DATE FROM df
-            """
-        )
+        if not df.empty:
+            df = df.copy()
+            df["calc_date"] = calc_date
+            if "adf_p_value" not in df.columns:
+                df["adf_p_value"] = np.nan
+            if "eg_p_value" not in df.columns:
+                df["eg_p_value"] = np.nan
+            if "half_life" not in df.columns:
+                df["half_life"] = np.nan
+            if "ratio_mean" not in df.columns:
+                df["ratio_mean"] = np.nan
+            if "ratio_std" not in df.columns:
+                df["ratio_std"] = np.nan
+            if "zero_crossings" not in df.columns:
+                df["zero_crossings"] = 0
+            if "hedge_ratio" not in df.columns:
+                df["hedge_ratio"] = np.nan
+            if "composite_score" not in df.columns:
+                df["composite_score"] = np.nan
+            conn.execute(
+                """
+                INSERT INTO correlations
+                    (stock_id, peer_id, correlation, adf_p_value, eg_p_value, half_life,
+                     ratio_mean, ratio_std, zero_crossings, hedge_ratio, composite_score, calc_date)
+                SELECT stock_id, peer_id, correlation, adf_p_value, eg_p_value, half_life,
+                       ratio_mean, ratio_std, zero_crossings, hedge_ratio, composite_score, calc_date::DATE
+                FROM df
+                """
+            )
         conn.execute(
             """
             INSERT INTO correlation_meta (key, value) VALUES ('last_calc_date', ?)
@@ -239,8 +264,9 @@ def upsert_correlations(df: pd.DataFrame, calc_date: str) -> int:
             """,
             [count_row[0] if count_row else "0"],
         )
-    _log_update("correlations", len(df))
-    return len(df)
+    n = 0 if df.empty else len(df)
+    _log_update("correlations", n)
+    return n
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -271,6 +297,47 @@ def upsert_disposition_events(rows: List[Tuple]) -> int:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# warrant_master (TWSE MOPS 公開資料)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def upsert_warrant_master(
+    rows: List[
+        Tuple[str, str, str, Optional[str], str, float, float, date, str]
+    ],
+) -> int:
+    """
+    Upsert warrant_master.
+    rows: [(warrant_code, warrant_name, underlying_symbol, underlying_name,
+            cp, strike, exercise_ratio, expiry_date, board), ...]
+    board: 'TSE' | 'OTC'
+    """
+    if not rows:
+        return 0
+    with duck_write() as conn:
+        conn.executemany(
+            """
+            INSERT INTO warrant_master (
+                warrant_code, warrant_name, underlying_symbol, underlying_name,
+                cp, strike, exercise_ratio, expiry_date, board, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+            ON CONFLICT (warrant_code) DO UPDATE SET
+                warrant_name       = excluded.warrant_name,
+                underlying_symbol  = excluded.underlying_symbol,
+                underlying_name    = excluded.underlying_name,
+                cp                 = excluded.cp,
+                strike             = excluded.strike,
+                exercise_ratio     = excluded.exercise_ratio,
+                expiry_date        = excluded.expiry_date,
+                board              = excluded.board,
+                updated_at         = now()
+            """,
+            rows,
+        )
+    _log_update("warrant_master", len(rows))
+    return len(rows)
+
+
 # warrant_positions / branch_trading
 # ──────────────────────────────────────────────────────────────────────────────
 

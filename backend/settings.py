@@ -14,6 +14,19 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 
+def _get_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+# 雙刀戰法綜合評分權重（建議總和為 1.0，可透過 .env 微調）
+CORR_WEIGHT_CROSSINGS = _get_env_float("CORR_WEIGHT_CROSSINGS", 0.50)
+CORR_WEIGHT_HALFLIFE = _get_env_float("CORR_WEIGHT_HALFLIFE", 0.35)
+CORR_WEIGHT_PEARSON = _get_env_float("CORR_WEIGHT_PEARSON", 0.15)
+
+
 def sinopac_credentials_configured() -> bool:
     key = os.getenv("SINOPAC_API_KEY", "").strip()
     secret = os.getenv("SINOPAC_SECRET_KEY", "").strip()

@@ -30,7 +30,7 @@ export default defineConfig({
   base: "./",
   build: {
     // Tauri 使用 Chromium，不需要舊瀏覽器 polyfill
-    target: ["es2021", "chrome100", "safari13"],
+    target: "es2022",
     outDir: "dist",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,

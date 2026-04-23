@@ -82,6 +82,23 @@ CREATE TABLE IF NOT EXISTS branch_trading (
     PRIMARY KEY (trade_date, stock_id, branch_name)
 );
 
+-- 權證主檔（證交所公開資料 t187ap36 + t187ap37；供履約價／到期日／行使比例）
+CREATE TABLE IF NOT EXISTS warrant_master (
+    warrant_code       VARCHAR PRIMARY KEY,
+    warrant_name       VARCHAR NOT NULL,
+    underlying_symbol  VARCHAR NOT NULL,
+    underlying_name    VARCHAR,
+    cp                 VARCHAR NOT NULL,
+    strike             DOUBLE NOT NULL,
+    exercise_ratio     DOUBLE NOT NULL,
+    expiry_date        DATE   NOT NULL,
+    board              VARCHAR NOT NULL,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_warrant_master_underlying
+    ON warrant_master (underlying_symbol);
+
 -- 權證部位
 CREATE TABLE IF NOT EXISTS warrant_positions (
     snapshot_date   DATE    NOT NULL,
@@ -110,12 +127,20 @@ CREATE TABLE IF NOT EXISTS insider_transfers (
 
 -- ─── Derived / Analysis ──────────────────────────────────────────────────────
 
--- Pearson correlation pairs  (weekly rebuild)
+-- 雙刀戰法配對：Pearson 初篩 + 比值 ADF（平穩性）+ 半衰期
 CREATE TABLE IF NOT EXISTS correlations (
-    stock_id    VARCHAR NOT NULL,
-    peer_id     VARCHAR NOT NULL,
-    correlation DOUBLE,
-    calc_date   DATE,
+    stock_id     VARCHAR NOT NULL,
+    peer_id      VARCHAR NOT NULL,
+    correlation  DOUBLE,
+    adf_p_value  DOUBLE,
+    half_life    DOUBLE,
+    ratio_mean   DOUBLE,
+    ratio_std    DOUBLE,
+    zero_crossings INTEGER,
+    hedge_ratio  DOUBLE,
+    eg_p_value   DOUBLE,
+    composite_score DOUBLE,
+    calc_date    DATE,
     PRIMARY KEY (stock_id, peer_id)
 );
 

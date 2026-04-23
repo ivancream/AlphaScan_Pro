@@ -24,7 +24,7 @@ from backend.api.v1 import (
     market_data, market_brief, sentiment, global_market, fundamental,
     technical, swing, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
-    heatmap, live_quotes, all_around, intraday_scanner, notifier as notifier_api,
+    heatmap, live_quotes, all_around, intraday_scanner, warrants, notifier as notifier_api,
     system as system_api,
 )
 from backend.engines.engine_live_quotes import live_quote_engine
@@ -144,6 +144,7 @@ app.include_router(heatmap.router, tags=["Heatmap"])
 app.include_router(live_quotes.router, tags=["Live Quotes"])
 app.include_router(all_around.router, tags=["All-Around Ticker"])
 app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
+app.include_router(warrants.router, tags=["Warrants"])
 app.include_router(notifier_api.router, tags=["Notifications"])
 app.include_router(system_api.router, tags=["System"])
 

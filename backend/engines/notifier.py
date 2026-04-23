@@ -220,8 +220,8 @@ def build_scan_embeds(
             extra_parts = []
             if strategy == "long":
                 bw  = item.get("帶寬增長(%)", "—")
-                vr  = item.get("量比", "—")
-                extra_parts = [f"帶寬增長 {bw}%", f"量比 {vr}"]
+                vr = item.get("5MA量比", item.get("量比", "—"))
+                extra_parts = [f"帶寬增長 {bw}%", f"5MA量比 {vr}"]
             elif strategy == "short":
                 bp  = item.get("布林位置", "—")
                 sl  = item.get("月線斜率", "—")
