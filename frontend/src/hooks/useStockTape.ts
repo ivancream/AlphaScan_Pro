@@ -12,12 +12,27 @@ const RECONNECT_MS = 2500;
 const MAX_TICKS = 50;
 const FLUSH_MS = 100;
 
+function normalizeSymbol(raw: string): string {
+  const s = String(raw ?? '').trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+  return s;
+}
+
+function symbolMatches(a: string, b: string): boolean {
+  const na = normalizeSymbol(a);
+  const nb = normalizeSymbol(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const da = na.replace(/\D/g, '');
+  const db = nb.replace(/\D/g, '');
+  return !!da && !!db && da === db;
+}
+
 /**
  * 單一個股逐筆成交（all-around WS + symbols 篩選）。
  * 以節流寫入 state，避免每筆 tick 觸發整頁重繪卡死。
  */
 export function useStockTape(symbol: string) {
-  const normalizedSymbol = useMemo(() => String(symbol ?? '').trim().toUpperCase(), [symbol]);
+  const normalizedSymbol = useMemo(() => normalizeSymbol(symbol), [symbol]);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [ticks, setTicks] = useState<UnifiedTick[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
@@ -106,7 +121,7 @@ export function useStockTape(symbol: string) {
   }, [normalizedSymbol, scheduleFlush]);
 
   const stockTicks = useMemo(
-    () => ticks.filter((tick) => tick.asset_type === '現貨' && tick.symbol === normalizedSymbol),
+    () => ticks.filter((tick) => tick.asset_type === '現貨' && symbolMatches(tick.symbol, normalizedSymbol)),
     [ticks, normalizedSymbol],
   );
 

@@ -75,7 +75,7 @@ export function useHeatmapData() {
             if (!res.ok) {
                 if (res.status === 502 || res.status === 503) {
                     throw new Error(
-                        `無法連到後端（${res.status}）。請確認 FastAPI 已在 http://127.0.0.1:8000 執行（例如執行專案 start-dev.bat 或 uvicorn）。`
+                        `無法連到後端（${res.status}）。請確認 FastAPI 已在 http://127.0.0.1:8000 執行（例如執行 scripts/dev/start-dev.bat 或 uvicorn）。`
                     );
                 }
                 throw new Error(`API Error: ${res.status}`);

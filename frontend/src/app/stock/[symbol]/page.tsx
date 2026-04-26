@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { Virtuoso } from 'react-virtuoso';
 import {
   AlertCircle,
+  BarChart3,
   ListOrdered,
   CandlestickChart as CandlestickIcon,
   Radio,
@@ -14,6 +15,7 @@ import {
 
 import { CandlestickChart as StockChart } from '@/components/charts/CandlestickChart';
 import { IntradayChart } from '@/components/charts/IntradayChart';
+import { LargeOrderFlow } from '@/components/stock/LargeOrderFlow';
 import { useHistoricalData } from '@/hooks/useHistoricalData';
 import { useLiveQuotes } from '@/hooks/useLiveQuotes';
 import { useStockTape } from '@/hooks/useStockTape';
@@ -25,12 +27,13 @@ import type { UnifiedTick } from '@/types/quote';
 
 // ─── Tab 定義 ─────────────────────────────────────────────────────────────────
 
-type Tab = 'kline' | 'intraday' | 'ticks';
+type Tab = 'kline' | 'intraday' | 'ticks' | 'large-order-flow';
 
 const TABS: { id: Tab; icon: React.ReactNode; label: string }[] = [
   { id: 'kline',    icon: <CandlestickIcon size={15} />, label: '技術K線' },
   { id: 'intraday', icon: <TrendingUp size={15} />,       label: '即時走勢' },
   { id: 'ticks',    icon: <ListOrdered size={15} />,      label: '逐筆明細' },
+  { id: 'large-order-flow', icon: <BarChart3 size={15} />, label: '大單進出' },
 ];
 
 // ─── Chart period (未來擴充 15/60 分K 只需在此加項目) ─────────────────────────
@@ -324,6 +327,11 @@ export default function StockDetailPage() {
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Tab: 大單進出 ───────────────────────────────────────────────────── */}
+        <div className={`h-full min-h-0 flex flex-col ${activeTab === 'large-order-flow' ? 'flex' : 'hidden'}`}>
+          <LargeOrderFlow symbol={symbol} stockTicks={stockTicks} />
         </div>
       </div>
     </div>

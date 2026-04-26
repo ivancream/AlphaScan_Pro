@@ -6,6 +6,14 @@
 
 ## 開發環境快速啟動
 
+### 0. 一鍵啟動（建議）
+
+```powershell
+start-dev.bat
+```
+
+> 根目錄 `start-dev.bat` 為捷徑，實際腳本位於 `scripts/dev/start-dev.bat`。
+
 ### 1. 啟動後端 FastAPI
 
 ```powershell
@@ -98,6 +106,10 @@ AlphaScan_Pro/
 │   │   └── tauri.conf.json
 │   ├── index.html        # Vite 入口
 │   └── vite.config.ts
+├── config/
+│   └── theme.json        # 題材分類設定
+├── scripts/
+│   └── dev/              # 開發啟動/清理腳本
 ├── backend.spec          # PyInstaller 打包設定
 └── .env                  # 本機環境變數（不 commit）
 ```

@@ -92,7 +92,9 @@ _DEFAULT_FUTURES_PREFIX = ["TXF", "MXF"]
 
 class AllAroundEngine:
 
-    HISTORY_SIZE = 500
+    # Keep a larger in-memory tick window so downstream APIs can still
+    # derive intraday metrics shortly after market close.
+    HISTORY_SIZE = 20_000
 
     def __init__(self) -> None:
         self._subscribers:    Set[asyncio.Queue] = set()

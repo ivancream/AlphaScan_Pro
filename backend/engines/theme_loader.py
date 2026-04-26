@@ -1,7 +1,7 @@
 """
 小視野題材來源（合併後供 heatmap / refresh）：
 
-1. 專案根目錄 theme.json — 題材分類表：{ "題材名": ["代號", ...], ... }，會反轉為代號→題材列表。
+1. config/theme.json（相容舊版專案根目錄 theme.json）— 題材分類表：{ "題材名": ["代號", ...], ... }，會反轉為代號→題材列表。
 2. data/stock_themes.json — { "themes": { "代號": "題材" | ["題材", ...] } }；若某代號有設定，整組覆寫 theme.json 該檔的題材。
 """
 
@@ -13,7 +13,24 @@ from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 THEMES_JSON = _PROJECT_ROOT / "data" / "stock_themes.json"
-THEME_CATALOG_JSON = _PROJECT_ROOT / "theme.json"
+THEME_CATALOG_JSON = _PROJECT_ROOT / "config" / "theme.json"
+LEGACY_THEME_CATALOG_JSON = _PROJECT_ROOT / "theme.json"
+
+
+def _read_theme_catalog_json() -> dict[str, Any]:
+    for path in (THEME_CATALOG_JSON, LEGACY_THEME_CATALOG_JSON):
+        if not path.exists():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            if raw.startswith("\ufeff"):
+                raw = raw[1:]
+            data = json.loads(raw) if raw.strip() else {}
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            continue
+    return {}
 
 
 def _theme_tags_from_json_value(v: Any) -> list[str]:
@@ -41,15 +58,10 @@ def load_theme_catalog_theme_to_stocks() -> dict[str, list[str]]:
     theme.json：{ "題材名": ["2330", ...] } -> { "題材名": ["2330", ...] }（去重、保序）。
     供族群動能快報等需「依題材鍵聚合成分股」的用途；與 load_theme_catalog_stock_tags 互為反轉視角。
     """
-    if not THEME_CATALOG_JSON.exists():
+    data = _read_theme_catalog_json()
+    if not data:
         return {}
     try:
-        raw = THEME_CATALOG_JSON.read_text(encoding="utf-8")
-        if raw.startswith("\ufeff"):
-            raw = raw[1:]
-        data = json.loads(raw) if raw.strip() else {}
-        if not isinstance(data, dict):
-            return {}
         out: dict[str, list[str]] = {}
         for theme_name, tickers in data.items():
             tname = str(theme_name).strip()
@@ -79,15 +91,10 @@ def load_theme_catalog_stock_tags() -> dict[str, list[str]]:
     theme.json：{ "題材名": ["2330", ...] } -> { "2330": ["題材A", "題材B"], ... }。
     同一檔出現在多個題材鍵底下會合併為多個標籤（依 JSON 物件鍵順序）。
     """
-    if not THEME_CATALOG_JSON.exists():
+    data = _read_theme_catalog_json()
+    if not data:
         return {}
     try:
-        raw = THEME_CATALOG_JSON.read_text(encoding="utf-8")
-        if raw.startswith("\ufeff"):
-            raw = raw[1:]
-        data = json.loads(raw) if raw.strip() else {}
-        if not isinstance(data, dict):
-            return {}
         out: dict[str, list[str]] = {}
         for theme_name, tickers in data.items():
             tname = str(theme_name).strip()
