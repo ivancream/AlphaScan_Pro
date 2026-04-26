@@ -39,6 +39,47 @@ CREATE TABLE IF NOT EXISTS stock_info (
 CREATE INDEX IF NOT EXISTS idx_daily_prices_date
     ON daily_prices (date DESC);
 
+-- ML historical adjusted daily bars (5y+ for training)
+CREATE TABLE IF NOT EXISTS historical_kbars_adj (
+    symbol  VARCHAR NOT NULL,
+    date    DATE    NOT NULL,
+    open    DOUBLE,
+    high    DOUBLE,
+    low     DOUBLE,
+    close   DOUBLE,
+    volume  BIGINT,
+    amount  DOUBLE,
+    PRIMARY KEY (symbol, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_kbars_adj_date
+    ON historical_kbars_adj (date DESC);
+
+-- ML historical institutional chip data
+CREATE TABLE IF NOT EXISTS historical_chips (
+    symbol                   VARCHAR NOT NULL,
+    date                     DATE    NOT NULL,
+    foreign_buy              BIGINT,
+    foreign_sell             BIGINT,
+    investment_trust_buy     BIGINT,
+    investment_trust_sell    BIGINT,
+    dealer_buy               BIGINT,
+    dealer_sell              BIGINT,
+    total_shares_outstanding BIGINT,
+    PRIMARY KEY (symbol, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_chips_date
+    ON historical_chips (date DESC);
+
+-- Market / macro indicators for regime features
+CREATE TABLE IF NOT EXISTS macro_indicators (
+    date         DATE PRIMARY KEY,
+    taiex_close  DOUBLE,
+    taiex_volume BIGINT,
+    vix          DOUBLE
+);
+
 -- Dividends  (updated once a year via yfinance)
 CREATE TABLE IF NOT EXISTS dividends (
     stock_id VARCHAR NOT NULL,

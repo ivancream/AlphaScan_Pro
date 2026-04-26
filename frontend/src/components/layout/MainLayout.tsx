@@ -13,6 +13,7 @@ import {
     CandlestickChart,
     LineChart,
     Target,
+    Brain,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAppStore } from '@/store/useAppStore';
@@ -43,6 +44,7 @@ const NAV_GROUPS: NavGroup[] = [
             { href: '/watchlist', icon: <Star size={18} />, label: '自選清單' },
             { href: '/long-selection', icon: <TrendingUp size={18} />, label: '多方選股' },
             { href: '/short-selection', icon: <TrendingDown size={18} />, label: '空方選股' },
+            { href: '/ml-quant', icon: <Brain size={18} />, label: 'ML Quant' },
         ],
     },
     {

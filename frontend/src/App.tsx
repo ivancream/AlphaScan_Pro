@@ -22,6 +22,7 @@ const DispositionPage     = lazy(() => import('./app/disposition/page'));
 const FloorBouncePage     = lazy(() => import('./app/floor-bounce/page'));
 const EtfTrackerPage      = lazy(() => import('./app/etf-tracker/page'));
 const WarrantSelectionPage = lazy(() => import('./app/warrant-selection/page'));
+const MlQuantPage          = lazy(() => import('./app/ml-quant/page'));
 const StockHubPage        = lazy(() => import('./app/stock/page'));
 const StockDetailPage     = lazy(() => import('./app/stock/[symbol]/page'));
 
@@ -64,6 +65,7 @@ function AppRoutes() {
           <Route path="/floor-bounce"    element={<FloorBouncePage />} />
           <Route path="/etf-tracker"     element={<EtfTrackerPage />} />
           <Route path="/warrant-selection" element={<WarrantSelectionPage />} />
+          <Route path="/ml-quant"         element={<MlQuantPage />} />
 
           {/* 個股 */}
           <Route path="/stock"           element={<StockHubPage />} />

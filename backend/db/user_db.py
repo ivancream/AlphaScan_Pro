@@ -87,10 +87,23 @@ def write_signals(
         # Prune: keep only the 5 most recent scan_ids per strategy
         conn.execute(
             """
-            DELETE FROM intraday_signals
-            WHERE scan_id NOT IN (
-                SELECT DISTINCT scan_id FROM intraday_signals
-                ORDER BY scan_time DESC LIMIT 5
+            DELETE FROM intraday_signals AS t
+            WHERE t.scan_id NOT IN (
+                SELECT scan_id
+                FROM (
+                    SELECT
+                        strategy,
+                        scan_id,
+                        MAX(scan_time) AS latest_scan_time,
+                        DENSE_RANK() OVER (
+                            PARTITION BY strategy
+                            ORDER BY MAX(scan_time) DESC
+                        ) AS rk
+                    FROM intraday_signals
+                    GROUP BY strategy, scan_id
+                ) ranked
+                WHERE ranked.strategy = t.strategy
+                  AND ranked.rk <= 5
             )
             """
         )

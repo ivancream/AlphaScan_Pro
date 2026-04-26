@@ -25,7 +25,7 @@ from backend.api.v1 import (
     technical, swing, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
     heatmap, live_quotes, all_around, intraday_scanner, warrants, notifier as notifier_api,
-    system as system_api,
+    system as system_api, ml_quant,
 )
 from backend.engines.engine_live_quotes import live_quote_engine
 from backend.engines.engine_all_around import all_around_engine
@@ -147,6 +147,7 @@ app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
 app.include_router(warrants.router, tags=["Warrants"])
 app.include_router(notifier_api.router, tags=["Notifications"])
 app.include_router(system_api.router, tags=["System"])
+app.include_router(ml_quant.router, tags=["ML Quant"])
 
 @app.get("/")
 def open_frontend(request: Request):
