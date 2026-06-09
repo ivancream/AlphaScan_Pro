@@ -6,7 +6,8 @@
 function defaultBase(): string {
     if (typeof window === 'undefined') return 'http://localhost:8000';
     const { protocol, hostname, port } = window.location;
-    if (port === '1420' || port === '8000') return '';
+    if (port === '8000') return '';
+    if (port === '1420') return 'http://127.0.0.1:8000';
     return `${protocol}//${hostname}:8000`;
 }
 

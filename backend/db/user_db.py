@@ -134,3 +134,75 @@ def get_scan_status() -> Dict[str, Any]:
     if row:
         return {"scan_id": row["scan_id"], "last_scan_time": row["scan_time"]}
     return {"scan_id": None, "last_scan_time": None}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Intraday monitor event replay
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_monitor_event(event: Dict[str, Any], source: str = "shioaji") -> None:
+    """Persist one intraday monitor signal for replay and after-hours review."""
+    event_id = str(event.get("id") or "")
+    if not event_id:
+        return
+    now = datetime.now().isoformat()
+    with user_db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO intraday_monitor_events
+                (id, event_time, symbol, related_symbol, event_type, side,
+                 price, volume, source, signal_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                str(event.get("time") or now),
+                str(event.get("symbol") or ""),
+                str(event.get("related_symbol") or event.get("symbol") or ""),
+                str(event.get("event_type") or ""),
+                str(event.get("side") or ""),
+                float(event.get("price") or 0),
+                int(event.get("volume") or 0),
+                source,
+                json.dumps(event, ensure_ascii=False, default=str),
+                now,
+            ),
+        )
+
+
+def get_recent_monitor_events(
+    *,
+    symbol: Optional[str] = None,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    """Read recent intraday monitor events from user.db."""
+    lim = max(1, min(int(limit or 300), 2000))
+    with user_db() as conn:
+        if symbol:
+            rows = conn.execute(
+                """
+                SELECT signal_json
+                FROM intraday_monitor_events
+                WHERE related_symbol = ? OR symbol = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (symbol, symbol, lim),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT signal_json
+                FROM intraday_monitor_events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            out.append(json.loads(row["signal_json"]))
+        except Exception:
+            continue
+    return out

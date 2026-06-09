@@ -13,6 +13,10 @@ interface AppState {
     // 記憶已執行的掃描狀態
     scannedStrategies: string[];
     setScanned: (strategyId: string) => void;
+    // 後端啟動狀態
+    backendStatus: 'idle' | 'starting' | 'ready' | 'error';
+    backendError: string | null;
+    setBackendStatus: (status: AppState['backendStatus'], error?: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -32,5 +36,8 @@ export const useAppStore = create<AppState>((set) => ({
     scannedStrategies: [],
     setScanned: (id) => set((state) => ({
         scannedStrategies: state.scannedStrategies.includes(id) ? state.scannedStrategies : [...state.scannedStrategies, id]
-    }))
+    })),
+    backendStatus: 'idle',
+    backendError: null,
+    setBackendStatus: (status, error) => set({ backendStatus: status, backendError: error ?? null }),
 }));

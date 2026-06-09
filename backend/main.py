@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 # 將專案根目錄與 backend 目錄加入 sys.path
 root_path = Path(__file__).parent.parent.absolute()
@@ -24,12 +24,16 @@ from backend.api.v1 import (
     market_data, market_brief, sentiment, global_market, fundamental,
     technical, swing, floor_bounce, dividend,
     cb_tracker, chips, correlation, disposition, intraday, watchlist, backtest,
-    heatmap, live_quotes, all_around, intraday_scanner, warrants, notifier as notifier_api,
+    heatmap, live_quotes, all_around, intraday_scanner, intraday_monitor, warrants, notifier as notifier_api,
     system as system_api,
 )
 from backend.engines.engine_live_quotes import live_quote_engine
 from backend.engines.engine_all_around import all_around_engine
-from backend.engines.engine_symbol_pool import get_symbol_pool
+from backend.engines.engine_symbol_pool import (
+    get_taifex_stock_future_codes_for_symbols,
+    get_all_around_subscription_symbols,
+    get_all_around_symbol_pool,
+)
 from backend.engines.sinopac_session import sinopac_session
 
 import google.generativeai as genai
@@ -52,6 +56,9 @@ genai.GenerativeModel.generate_content = mocked_generate_content
 # ----------------------------------------
 
 app = FastAPI(title="AlphaScan Quant-Qual API", version="1.0.0")
+
+# 後端是否已完成初始化（供 health-check 使用）
+_backend_ready = False
 
 # 設定 CORS 允許前端 (Next.js 預設 3000 port) 存取
 app.add_middleware(
@@ -91,12 +98,19 @@ async def startup_db_client():
     # ── Step 2: 啟動統一排程器（取代舊的 intraday.start_scheduler + start_scanner） ──
     start_scheduler()
 
-    # ── Step 3: 資料完整性檢查 — 如果今日收盤資料不齊，用 yfinance 回補 ─────
+    # ── Step 3: 資料完整性檢查 — 背景回補，避免桌面端卡在 startup ─────
     try:
         from backend.api.v1.intraday import run_startup_catchup
-        await loop.run_in_executor(None, run_startup_catchup)
+
+        async def _startup_catchup_background():
+            try:
+                await loop.run_in_executor(None, run_startup_catchup)
+            except Exception as exc:
+                print(f"[StartupCatchup] Failed: {exc}")
+
+        loop.create_task(_startup_catchup_background())
     except Exception as exc:
-        print(f"[StartupCatchup] Failed: {exc}")
+        print(f"[StartupCatchup] Scheduling failed: {exc}")
 
     # ── Step 4: 啟動即時報價引擎（Shioaji handler 注冊 / yfinance fallback）──
     try:
@@ -106,13 +120,31 @@ async def startup_db_client():
 
     # ── Step 5: 啟動全方位報價引擎（STK + FOP ticks）────────────────────────
     try:
-        pool = get_symbol_pool(top_n=50)
-        stk_symbols = [item["stock_id"] for item in pool]
-        loop.create_task(
-            all_around_engine.start(stk_symbols=stk_symbols)
+        pool = get_all_around_symbol_pool(top_n=300)
+        stk_symbols = get_all_around_subscription_symbols(top_n=300)
+        stock_future_underlyings = [item["stock_id"] for item in pool]
+        stock_future_names = {
+            item["stock_id"]: item.get("name", item["stock_id"])
+            for item in pool
+        }
+        stock_future_product_codes = get_taifex_stock_future_codes_for_symbols(
+            stock_future_underlyings
         )
+        loop.create_task(
+            all_around_engine.start(
+                stk_symbols=stk_symbols,
+                stock_future_underlyings=stock_future_underlyings,
+                stock_future_names=stock_future_names,
+            )
+        )
+        if stock_future_product_codes:
+            all_around_engine.add_stock_futures_by_product_codes(stock_future_product_codes)
     except Exception as exc:
         print(f"[AllAround] Failed to start engine: {exc}")
+
+    global _backend_ready
+    _backend_ready = True
+    print("[Startup] AlphaScan backend is ready.")
 
 
 @app.on_event("shutdown")
@@ -144,9 +176,21 @@ app.include_router(heatmap.router, tags=["Heatmap"])
 app.include_router(live_quotes.router, tags=["Live Quotes"])
 app.include_router(all_around.router, tags=["All-Around Ticker"])
 app.include_router(intraday_scanner.router, tags=["Intraday Scanner"])
+app.include_router(intraday_monitor.router, tags=["Intraday Monitor"])
 app.include_router(warrants.router, tags=["Warrants"])
 app.include_router(notifier_api.router, tags=["Notifications"])
 app.include_router(system_api.router, tags=["System"])
+
+@app.get("/api/health", tags=["System"])
+def health_check():
+    """
+    前端 Tauri sidecar hook 用來輪詢後端是否就緒。
+    startup_db_client 完成後 _backend_ready 才會設為 True。
+    """
+    if _backend_ready:
+        return JSONResponse({"status": "ok", "ready": True})
+    return JSONResponse({"status": "starting", "ready": False}, status_code=503)
+
 
 @app.get("/")
 def open_frontend(request: Request):

@@ -4,16 +4,18 @@
  * 設計重點（高頻場景）：
  * 1. WebSocket 連線與重連邏輯封裝在 store 內，元件只需呼叫 connect / disconnect
  * 2. 節流 (100ms flush)：每 100ms 才批次寫入 state，避免每筆 tick 觸發 re-render
- * 3. FIFO 500 上限：陣列最舊端截斷，不需頻繁 GC
+ * 3. FIFO 2000 上限：陣列最舊端截斷，不需頻繁 GC
  * 4. ticks 陣列排序：index 0 = 最新，符合「由上到下最新」的看盤慣例
  */
 import { create } from 'zustand';
 import type { UnifiedTick } from '@/types/quote';
 
 import { wsUrl } from '@/lib/apiBase';
-const MAX_TICKS     = 500;
+const MAX_TICKS     = 2000;
 const FLUSH_MS      = 100;   // 節流間隔
 const RECONNECT_MS  = 3000;
+const MIN_STOCK_AMOUNT = 1_000_000;
+const MIN_FUTURES_VOLUME = 10;
 
 type ConnectionState = 'disconnected' | 'connecting' | 'open' | 'error';
 
@@ -21,7 +23,7 @@ interface AllAroundState {
   ticks:            UnifiedTick[];
   connectionState:  ConnectionState;
   volumeThreshold:  number;   // 大單高亮門檻（張/口）
-  tickCount:        number;   // 累計 tick 數（全局計數，不受 500 限制）
+  tickCount:        number;   // 累計 tick 數（全局計數，不受 2000 限制）
 
   setVolumeThreshold: (n: number) => void;
   connect:    () => void;
@@ -76,7 +78,7 @@ function _enqueueTick(tick: UnifiedTick) {
 export const useAllAroundStore = create<AllAroundState>((set, get) => ({
   ticks:           [],
   connectionState: 'disconnected',
-  volumeThreshold: 50,
+  volumeThreshold: 1,
   tickCount:       0,
 
   setVolumeThreshold: (n) => set({ volumeThreshold: n }),
@@ -87,7 +89,15 @@ export const useAllAroundStore = create<AllAroundState>((set, get) => ({
 
     set({ connectionState: 'connecting' });
 
-    const ws = new WebSocket(wsUrl('/ws/all-around-ticker'));
+    const params = new URLSearchParams({
+      scope: 'all_around',
+      include_futures: 'true',
+      large_only: 'true',
+      min_stock_amount: String(MIN_STOCK_AMOUNT),
+      min_futures_volume: String(MIN_FUTURES_VOLUME),
+      history_limit: '2000',
+    });
+    const ws = new WebSocket(wsUrl(`/ws/all-around-ticker?${params.toString()}`));
     _ws = ws;
 
     ws.onopen = () => {

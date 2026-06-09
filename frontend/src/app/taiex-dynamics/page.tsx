@@ -4,6 +4,8 @@ import { Activity, ArrowDownRight, ArrowUpRight, Gauge, LineChart, Minus } from 
 import { useTaiexMarketBrief } from '@/hooks/useTaiexMarketBrief';
 import { LoadingState } from '@/components/ui/LoadingState';
 import { toStockDetailPath } from '@/lib/stocks';
+import { MarketTapePanel } from '@/components/market/MarketTapePanel';
+import { FuturesSpreadRank } from '@/components/market/FuturesSpreadRank';
 
 function Sparkline({ series, positive }: { series: number[]; positive: boolean | null }) {
   const w = 240;
@@ -121,6 +123,38 @@ export default function TaiexDynamicsPage() {
           </span>
         </div>
       </header>
+
+      {/* ── 核心即時區塊：內外盤成交瀑布（左） + 期現貨價差排名（右上）── */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        {/* 左側：即時內外盤成交瀑布流 */}
+        <div className="xl:col-span-7 min-h-[600px]">
+          <MarketTapePanel height={520} />
+        </div>
+
+        {/* 右側：期現貨價差排名（上）+ 快速說明（下） */}
+        <div className="xl:col-span-5 flex flex-col gap-4">
+          <FuturesSpreadRank />
+
+          {/* 盤中解讀提示 */}
+          <aside className="rounded-2xl border border-gray-800/90 bg-gradient-to-b from-[#0d1524] to-[#080d14] p-5 text-sm text-gray-400 leading-relaxed">
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+              <Activity size={11} className="text-cyan-600" />
+              盤中解讀
+            </h3>
+            <ul className="space-y-2 list-disc list-inside marker:text-cyan-700 text-xs">
+              <li><span className="text-red-400 font-bold">外盤買</span>連續放量 → 主動買盤積極，偏多訊號。</li>
+              <li><span className="text-emerald-400 font-bold">內盤賣</span>連續放量 → 主動賣盤積極，留意轉弱。</li>
+              <li><span className="text-orange-300 font-bold">期貨</span>外盤 + 現貨同步走強 → 期現共振，強勢格局。</li>
+              <li><span className="text-red-300 font-bold">正價差</span>擴大 → 多方願意付溢價，情緒偏熱。</li>
+              <li><span className="text-emerald-300 font-bold">逆價差</span>出現 → 期貨弱於現貨，留意避險壓力。</li>
+            </ul>
+          </aside>
+        </div>
+      </div>
+
+      {/* ─────────────────────────────────────────────────────────────── */}
+      {/* 以下保留原有：加權指數 / 台指期 / 權值股貢獻表                */}
+      {/* ─────────────────────────────────────────────────────────────── */}
 
       {isLoading && (
         <div className="py-20">

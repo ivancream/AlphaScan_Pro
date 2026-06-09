@@ -15,6 +15,7 @@ SQLite (data/user.db)
 """
 
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -28,7 +29,20 @@ from .schema import DUCKDB_DDL, DUCKDB_COMPAT_VIEWS, USER_DB_DDL
 # ──────────────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────────────
-_PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
+
+def _resolve_data_root() -> Path:
+    """
+    找到 data/ 目錄的父目錄。
+    - PyInstaller 打包後：使用 sys.executable 旁的目錄（即 .exe 所在位置）
+    - 開發模式：使用專案根目錄（backend/db/connection.py → ../../../）
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包模式
+        return Path(sys.executable).parent
+    # 開發模式
+    return Path(__file__).parent.parent.parent.absolute()
+
+_PROJECT_ROOT = _resolve_data_root()
 DUCKDB_PATH = _PROJECT_ROOT / "data" / "market.duckdb"
 USER_DB_PATH = _PROJECT_ROOT / "data" / "user.db"
 

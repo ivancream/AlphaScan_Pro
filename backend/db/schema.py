@@ -216,4 +216,24 @@ CREATE TABLE IF NOT EXISTS intraday_signals (
 
 CREATE INDEX IF NOT EXISTS idx_signals_strategy_time
     ON intraday_signals (strategy, scan_time DESC);
+
+CREATE TABLE IF NOT EXISTS intraday_monitor_events (
+    id             TEXT PRIMARY KEY,
+    event_time     TEXT NOT NULL,
+    symbol         TEXT NOT NULL,
+    related_symbol TEXT,
+    event_type     TEXT NOT NULL,
+    side           TEXT,
+    price          REAL,
+    volume         INTEGER,
+    source         TEXT NOT NULL DEFAULT 'shioaji',
+    signal_json    TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_events_time
+    ON intraday_monitor_events (event_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_events_symbol_time
+    ON intraday_monitor_events (related_symbol, event_time DESC);
 """

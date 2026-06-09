@@ -20,12 +20,20 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
+from pathlib import Path
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel
 
 from backend.settings import sinopac_credentials_configured
+
+try:
+    from backend.db.connection import DUCKDB_PATH
+    _DATA_ROOT = DUCKDB_PATH.parent
+except Exception:
+    _DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,7 +102,7 @@ class AllAroundEngine:
 
     # Keep a larger in-memory tick window so downstream APIs can still
     # derive intraday metrics shortly after market close.
-    HISTORY_SIZE = 20_000
+    HISTORY_SIZE = 100_000
 
     def __init__(self) -> None:
         self._subscribers:    Set[asyncio.Queue] = set()
@@ -106,10 +114,64 @@ class AllAroundEngine:
         self._subscribed_fop: Set[str] = set()
         self._name_map:       Dict[str, str] = {}
         self._asset_map:      Dict[str, AssetType] = {}
+        self._futures_underlying_map: Dict[str, str] = {}
         self._tick_count      = 0
         self._last_tick_ts:   Optional[str] = None
         self._last_error:     Optional[str] = None
         self._recent_ticks:   List[dict] = []
+        self._loaded_history_date: Optional[str] = None
+
+    # ── 持久化快取 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _today_key() -> str:
+        return dt.datetime.now().strftime("%Y-%m-%d")
+
+    def _history_path(self, day: str | None = None) -> Path:
+        cache_dir = _DATA_ROOT / "all_around_ticks"
+        return cache_dir / f"{day or self._today_key()}.jsonl"
+
+    def _load_today_history(self) -> None:
+        day = self._today_key()
+        if self._loaded_history_date == day:
+            return
+        path = self._history_path(day)
+        self._loaded_history_date = day
+        if not path.exists():
+            return
+
+        rows: List[dict] = []
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"load tick history failed: {exc}"
+            return
+
+        if rows:
+            self._recent_ticks = rows[-self.HISTORY_SIZE:]
+            self._tick_count = max(self._tick_count, len(self._recent_ticks))
+            self._last_tick_ts = str(self._recent_ticks[-1].get("ts") or self._last_tick_ts or "")
+            print(f"[AllAround] 載入今日 tick 記錄 {len(self._recent_ticks)} 筆")
+
+    def _persist_tick(self, payload: dict) -> None:
+        try:
+            path = self._history_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+                fh.write("\n")
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"persist tick failed: {exc}"
 
     # ── 生命週期 ──────────────────────────────────────────────────────────────
 
@@ -117,9 +179,13 @@ class AllAroundEngine:
         self,
         stk_symbols:      List[str] | None = None,
         futures_prefixes: List[str] | None = None,
+        stock_future_underlyings: List[str] | None = None,
+        stock_future_names: Dict[str, str] | None = None,
     ) -> None:
         if self._running:
             return
+
+        self._load_today_history()
 
         if not sinopac_credentials_configured():
             self._last_error = "永豐金 API Key 未設定，全方位監控未啟動"
@@ -135,6 +201,8 @@ class AllAroundEngine:
                 lambda: self._bootstrap_shared_session(
                     stk_symbols=stk_symbols or [],
                     futures_prefixes=futures_prefixes or _DEFAULT_FUTURES_PREFIX,
+                    stock_future_underlyings=stock_future_underlyings or [],
+                    stock_future_names=stock_future_names or {},
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -156,6 +224,8 @@ class AllAroundEngine:
         self,
         stk_symbols:      List[str],
         futures_prefixes: List[str],
+        stock_future_underlyings: List[str],
+        stock_future_names: Dict[str, str],
     ) -> None:
         """
         使用 sinopac_session 已登入的 api，透過 add_stk_handler / add_fop_handler
@@ -183,6 +253,13 @@ class AllAroundEngine:
 
         for prefix in futures_prefixes:
             self._subscribe_fop_by_prefix(prefix, api, sjc)
+
+        self._subscribe_stock_futures_for_underlyings(
+            stock_future_underlyings,
+            api,
+            sjc,
+            stock_future_names,
+        )
 
         self._shioaji_active = True
         print(
@@ -240,21 +317,30 @@ class AllAroundEngine:
         except Exception as exc:  # noqa: BLE001
             print(f"[AllAround] STK 訂閱 {symbol} 失敗: {exc}")
 
-    def _subscribe_fop_by_prefix(self, prefix: str, api, sjc) -> None:
+    def _subscribe_fop_by_prefix(
+        self,
+        prefix: str,
+        api,
+        sjc,
+        *,
+        underlying_symbol: str | None = None,
+    ) -> str | None:
         try:
             ns = getattr(api.Contracts.Futures, prefix, None)
             if ns is None:
-                return
+                return None
             contracts = sorted(
                 [c for c in ns],
                 key=lambda c: getattr(c, "delivery_date", "9999"),
             )
             if not contracts:
-                return
+                return None
             contract = contracts[0]
             code = contract.code
             if code in self._subscribed_fop:
-                return
+                if underlying_symbol:
+                    self._futures_underlying_map[code] = self._normalize_symbol(underlying_symbol)
+                return code
             api.quote.subscribe(
                 contract,
                 quote_type=sjc.QuoteType.Tick,
@@ -263,9 +349,284 @@ class AllAroundEngine:
             self._subscribed_fop.add(code)
             self._name_map[code] = getattr(contract, "name", prefix)
             self._asset_map[code] = AssetType.FUTURES
+            if underlying_symbol:
+                self._futures_underlying_map[code] = self._normalize_symbol(underlying_symbol)
             print(f"[AllAround] FOP 訂閱: {code}")
+            return code
         except Exception as exc:  # noqa: BLE001
             print(f"[AllAround] FOP {prefix} 失敗: {exc}")
+            return None
+
+    @staticmethod
+    def _normalize_symbol(raw: Any) -> str:
+        return str(raw or "").strip().upper().replace(".TW", "").replace(".TWO", "")
+
+    @staticmethod
+    def _contract_text(contract: Any) -> str:
+        parts = []
+        for attr in (
+            "code",
+            "symbol",
+            "name",
+            "target_code",
+            "target_symbol",
+            "underlying_code",
+            "underlying_symbol",
+            "underlying_name",
+        ):
+            try:
+                value = getattr(contract, attr, None)
+            except Exception:
+                value = None
+            if value:
+                parts.append(str(value))
+        return " ".join(parts).upper()
+
+    def _contract_matches_underlying(
+        self,
+        contract: Any,
+        underlying: str,
+        underlying_name: str,
+    ) -> bool:
+        sid = self._normalize_symbol(underlying)
+        if not sid:
+            return False
+
+        for attr in ("target_code", "target_symbol", "underlying_code", "underlying_symbol"):
+            try:
+                value = self._normalize_symbol(getattr(contract, attr, ""))
+            except Exception:
+                value = ""
+            if value == sid:
+                return True
+
+        text = self._contract_text(contract)
+        if sid in text:
+            return True
+        name = str(underlying_name or "").strip().upper()
+        return bool(name and name in text)
+
+    def _iter_futures_contracts(self, api) -> List[Any]:
+        futures_root = getattr(api.Contracts, "Futures", None)
+        if futures_root is None:
+            return []
+
+        out: List[Any] = []
+        seen: Set[int] = set()
+
+        def walk(obj: Any, depth: int = 0) -> None:
+            if obj is None or depth > 5:
+                return
+            oid = id(obj)
+            if oid in seen:
+                return
+            seen.add(oid)
+
+            code = getattr(obj, "code", None)
+            if code and getattr(obj, "delivery_date", None):
+                out.append(obj)
+                return
+
+            if isinstance(obj, dict):
+                for child in obj.values():
+                    walk(child, depth + 1)
+                return
+
+            if isinstance(obj, (list, tuple, set)):
+                for child in obj:
+                    walk(child, depth + 1)
+                return
+
+            try:
+                keys = obj.keys()
+            except Exception:
+                keys = None
+            if keys is not None:
+                for key in list(keys):
+                    try:
+                        walk(obj[key], depth + 1)
+                    except Exception:
+                        try:
+                            walk(obj.get(key), depth + 1)
+                        except Exception:
+                            continue
+
+            try:
+                for child in obj:
+                    if isinstance(child, (str, bytes)):
+                        continue
+                    walk(child, depth + 1)
+            except Exception:
+                pass
+
+            for name in dir(obj):
+                if name.startswith("_"):
+                    continue
+                try:
+                    child = getattr(obj, name)
+                except Exception:
+                    continue
+                if callable(child) or isinstance(child, (str, bytes, int, float, bool)):
+                    continue
+                walk(child, depth + 1)
+
+        walk(futures_root)
+        unique: Dict[str, Any] = {}
+        for contract in out:
+            code = str(getattr(contract, "code", "") or "")
+            if code:
+                unique[code] = contract
+        return list(unique.values())
+
+    def _subscribe_fop_contract(
+        self,
+        contract: Any,
+        api,
+        sjc,
+        *,
+        underlying_symbol: str | None = None,
+    ) -> str | None:
+        try:
+            code = str(getattr(contract, "code", "") or "")
+            if not code or code in self._subscribed_fop:
+                if code and underlying_symbol:
+                    self._futures_underlying_map[code] = self._normalize_symbol(underlying_symbol)
+                return code if code else None
+            api.quote.subscribe(
+                contract,
+                quote_type=sjc.QuoteType.Tick,
+                version=sjc.QuoteVersion.v1,
+            )
+            self._subscribed_fop.add(code)
+            self._name_map[code] = getattr(contract, "name", code)
+            self._asset_map[code] = AssetType.FUTURES
+            if underlying_symbol:
+                self._futures_underlying_map[code] = self._normalize_symbol(underlying_symbol)
+            print(f"[AllAround] FOP 訂閱: {code}")
+            return code
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AllAround] FOP 合約訂閱失敗: {exc}")
+            return None
+
+    def _subscribe_stock_futures_for_underlyings(
+        self,
+        underlyings: List[str],
+        api,
+        sjc,
+        names: Dict[str, str] | None = None,
+        *,
+        max_contracts_per_underlying: int = 1,
+    ) -> List[str]:
+        symbols = [self._normalize_symbol(s) for s in underlyings]
+        symbols = [s for s in dict.fromkeys(symbols) if s]
+        if not symbols or max_contracts_per_underlying <= 0:
+            return []
+
+        name_map = {self._normalize_symbol(k): str(v or "") for k, v in (names or {}).items()}
+        all_contracts = self._iter_futures_contracts(api)
+        subscribed: List[str] = []
+
+        for sid in symbols:
+            matches = [
+                c for c in all_contracts
+                if self._contract_matches_underlying(c, sid, name_map.get(sid, ""))
+            ]
+            matches = sorted(
+                matches,
+                key=lambda c: (
+                    str(getattr(c, "delivery_date", "9999") or "9999"),
+                    str(getattr(c, "code", "") or ""),
+                ),
+            )
+            for contract in matches[:max_contracts_per_underlying]:
+                code = self._subscribe_fop_contract(
+                    contract,
+                    api,
+                    sjc,
+                    underlying_symbol=sid,
+                )
+                if code:
+                    subscribed.append(code)
+
+        return [c for c in dict.fromkeys(subscribed) if c]
+
+    def add_stock_futures_for_underlyings(
+        self,
+        underlyings: List[str],
+        names: Dict[str, str] | None = None,
+    ) -> List[str]:
+        """Dynamically subscribe nearest stock futures for underlying stocks."""
+        from backend.engines.sinopac_session import sinopac_session
+
+        api = self._api or sinopac_session.api
+        if api is None:
+            return []
+
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return []
+
+        self._api = api
+        sinopac_session.add_fop_handler(self._dispatch_fop_sync)
+
+        try:
+            import shioaji.constant as sjc
+
+            return self._subscribe_stock_futures_for_underlyings(
+                underlyings,
+                self._api,
+                sjc,
+                names or {},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AllAround] 股票期貨動態訂閱失敗: {exc}")
+            return []
+
+    def add_stock_futures_by_product_codes(
+        self,
+        stock_to_product_code: Dict[str, str],
+    ) -> List[str]:
+        """Subscribe nearest stock futures using TAIFEX product codes."""
+        from backend.engines.sinopac_session import sinopac_session
+
+        api = self._api or sinopac_session.api
+        if api is None:
+            return []
+
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return []
+
+        self._api = api
+        sinopac_session.add_fop_handler(self._dispatch_fop_sync)
+
+        try:
+            import shioaji.constant as sjc
+
+            out: List[str] = []
+            for stock_id, product_code in stock_to_product_code.items():
+                raw_code = str(product_code or "").strip().upper()
+                if not raw_code:
+                    continue
+                candidates = [raw_code] if raw_code.endswith("F") else [f"{raw_code}F", raw_code]
+                for prefix in candidates:
+                    code = self._subscribe_fop_by_prefix(
+                        prefix,
+                        self._api,
+                        sjc,
+                        underlying_symbol=stock_id,
+                    )
+                    if code:
+                        out.append(code)
+                        break
+            return [c for c in dict.fromkeys(out) if c]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AllAround] 期交所商品代碼訂閱股票期貨失敗: {exc}")
+            return []
 
     def add_stk_symbols(self, symbols: List[str]) -> None:
         """個股頁 WS 連線時動態訂閱；即使 start() 未成功，仍嘗試使用共享 Session。"""
@@ -365,6 +726,7 @@ class AllAroundEngine:
         self._recent_ticks.append(payload)
         if len(self._recent_ticks) > self.HISTORY_SIZE:
             self._recent_ticks = self._recent_ticks[-self.HISTORY_SIZE:]
+        self._persist_tick(payload)
 
         stale: List[asyncio.Queue] = []
         for queue in self._subscribers:
@@ -396,6 +758,7 @@ class AllAroundEngine:
         limit: int = 120,
     ) -> List[dict]:
         """傳回最近 N 筆 tick（給新連線的 WS 客戶端回補）。"""
+        self._load_today_history()
         result: List[dict] = []
         for t in reversed(self._recent_ticks):
             sym = t.get("symbol", "")
@@ -411,6 +774,9 @@ class AllAroundEngine:
         result.reverse()
         return result
 
+    def get_stock_futures_underlying_map(self) -> Dict[str, str]:
+        return dict(self._futures_underlying_map)
+
     # ── 健康狀態 ──────────────────────────────────────────────────────────────
 
     def get_health(self) -> dict:
@@ -419,10 +785,13 @@ class AllAroundEngine:
             "shioaji_active": self._shioaji_active,
             "subscribed_stk": len(self._subscribed_stk),
             "subscribed_fop": len(self._subscribed_fop),
+            "stock_futures_mapped": len(self._futures_underlying_map),
             "ws_subscribers": len(self._subscribers),
             "tick_count":     self._tick_count,
             "last_tick_ts":   self._last_tick_ts,
             "last_error":     self._last_error,
+            "history_file":    str(self._history_path()),
+            "history_loaded_date": self._loaded_history_date,
         }
 
 

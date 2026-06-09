@@ -20,7 +20,7 @@ Shioaji 同一組 API Key **只允許一個活躍登入 Session**。
     # 批次取得 OHLCV 快照（返回 {stock_id: {Open,High,Low,Close,Volume,ChangeRate}}）
     ohlcv = sinopac_session.get_ohlcv_map(["2330", "2317"])
 
-Tick 回調注意事項
+Tick / BidAsk 回調注意事項
 ─────────────────────────────────────────────────────────────────────────────
 Shioaji 的 @api.on_tick_stk_v1() 與 @api.on_tick_fop_v1() 每次呼叫都會
 **覆蓋**前一個 callback（非堆疊）。
@@ -34,7 +34,8 @@ Shioaji 的 @api.on_tick_stk_v1() 與 @api.on_tick_fop_v1() 每次呼叫都會
     sinopac_session.add_stk_handler(all_around_engine._dispatch_stk_sync)
 
 本模組已實作此 dispatch 機制，引擎只需呼叫 add_stk_handler / add_fop_handler
-即可安全地共享同一個 Tick 推播流。
+即可安全地共享同一個 Tick 推播流。BidAsk 五檔同樣使用 add_stk_bidask_handler
+共享同一個 Shioaji callback。
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ class SinopacSession:
         # Tick 分發器：handler list，每個引擎各自注冊
         self._stk_handlers: List[Callable] = []
         self._fop_handlers: List[Callable] = []
+        self._stk_bidask_handlers: List[Callable] = []
         self._callbacks_registered = False
 
     # ── 連線管理 ─────────────────────────────────────────────────────────────
@@ -140,6 +142,17 @@ class SinopacSession:
                 except Exception:  # noqa: BLE001
                     pass
 
+        try:
+            @api.on_bidask_stk_v1()
+            def _master_stk_bidask(exchange, bidask):
+                for handler in self._stk_bidask_handlers:
+                    try:
+                        handler(exchange, bidask)
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SinopacSession] BidAsk callback registration skipped: {exc}")
+
         self._callbacks_registered = True
         print("[SinopacSession] Master tick callbacks 已注冊")
 
@@ -152,6 +165,11 @@ class SinopacSession:
         """新增期貨/選擇權 Tick 處理器。"""
         if handler not in self._fop_handlers:
             self._fop_handlers.append(handler)
+
+    def add_stk_bidask_handler(self, handler: Callable) -> None:
+        """新增股票 BidAsk 五檔處理器（允許多個引擎共用）。"""
+        if handler not in self._stk_bidask_handlers:
+            self._stk_bidask_handlers.append(handler)
 
     # ── Snapshot 批次查詢 ────────────────────────────────────────────────────
 
