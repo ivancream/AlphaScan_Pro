@@ -73,6 +73,7 @@ class ScalpTriggerConfig:
     spoof_drop_pct: float = 0.65
     spoof_cooldown_sec: float = 5.0
     signal_cooldown_sec: float = 8.0
+    tick_size: Optional[float] = None
 
 
 @dataclass
@@ -475,7 +476,7 @@ class IntradayScalpEngine:
             return None
         if not (no_new_high or wall or refs):
             return None
-        stop = max(state.day_high, run.get("high") or price) + price_tick_size(price)
+        stop = max(state.day_high, run.get("high") or price) + self._price_tick_size(price)
         return ScalpSignal(
             kind="scalp_short_exhaustion",
             symbol=symbol,
@@ -517,7 +518,7 @@ class IntradayScalpEngine:
             return None
         if not (no_new_low or wall or refs):
             return None
-        stop = min(state.day_low or price, run.get("low") or price) - price_tick_size(price)
+        stop = min(state.day_low or price, run.get("low") or price) - self._price_tick_size(price)
         return ScalpSignal(
             kind="scalp_long_exhaustion",
             symbol=symbol,
@@ -641,8 +642,12 @@ class IntradayScalpEngine:
         return sum(item[2] for item in state.ticks) / max(1, len(state.ticks))
 
     def _is_price_near(self, price: float, level_price: float) -> bool:
-        tolerance = price_tick_size(price) * max(0, self.config.wall_price_tolerance_ticks)
+        tolerance = self._price_tick_size(price) * max(0, self.config.wall_price_tolerance_ticks)
         return abs(price - level_price) <= tolerance + 1e-9
+
+    def _price_tick_size(self, price: float) -> float:
+        override = safe_float(self.config.tick_size)
+        return override if override > 0 else price_tick_size(price)
 
     def _levels_by_price(self, levels: Iterable[Dict[str, Any]]) -> Dict[float, float]:
         out: Dict[float, float] = {}

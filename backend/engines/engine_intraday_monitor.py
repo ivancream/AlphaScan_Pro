@@ -76,10 +76,18 @@ class MonitorThresholds:
     scalp_no_new_extreme_sec: float = 2.0
     scalp_spoof_min_lots: int = 200
     scalp_spoof_drop_pct: float = 0.65
+    include_index_futures: bool = True
+    futures_lot_threshold: int = 10
+    futures_consecutive_min_count: int = 10
+    futures_consecutive_min_volume: int = 30
+    futures_reversal_min_lots: int = 5
+    futures_vwap_deviation_pct: float = 0.25
+    futures_wall_lots: int = 80
 
 
 WarrantMap = Dict[str, Dict[str, str]]
 BranchTagMap = Dict[str, List[Dict[str, Any]]]
+INDEX_FUTURES_PREFIXES = ("TXF", "MXF")
 
 
 class LiveOrderBookCache:
@@ -94,6 +102,10 @@ class LiveOrderBookCache:
         if self._registered:
             return
         sinopac_session.add_stk_bidask_handler(self._handle_bidask_sync)
+        try:
+            sinopac_session.add_fop_bidask_handler(self._handle_fop_bidask_sync)
+        except Exception:
+            pass
         self._registered = True
 
     def ensure_symbols(self, symbols: Iterable[str]) -> None:
@@ -131,8 +143,58 @@ class LiveOrderBookCache:
             except Exception as exc:  # noqa: BLE001
                 self._last_error = f"{symbol}: {exc}"
 
+    def ensure_futures_prefixes(self, prefixes: Iterable[str]) -> Dict[str, str]:
+        self.register_handler()
+        api = sinopac_session.api
+        if api is None:
+            return {}
+        try:
+            import shioaji.constant as sjc
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
+            return {}
+
+        out: Dict[str, str] = {}
+        for raw in prefixes:
+            prefix = _normalize_symbol(raw)
+            if not prefix:
+                continue
+            try:
+                ns = getattr(api.Contracts.Futures, prefix, None)
+                contracts = sorted(
+                    [c for c in ns] if ns is not None else [],
+                    key=lambda c: getattr(c, "delivery_date", "9999"),
+                )
+            except Exception:
+                contracts = []
+            if not contracts:
+                continue
+            contract = contracts[0]
+            code = _normalize_symbol(getattr(contract, "code", prefix))
+            if not code:
+                continue
+            out[prefix] = code
+            if code in self._subscribed:
+                continue
+            try:
+                api.quote.subscribe(
+                    contract,
+                    quote_type=sjc.QuoteType.BidAsk,
+                    version=sjc.QuoteVersion.v1,
+                )
+                self._subscribed.add(code)
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = f"{code}: {exc}"
+        return out
+
     def _handle_bidask_sync(self, exchange: Any, bidask: Any) -> None:
-        code = _normalize_symbol(getattr(bidask, "code", ""))
+        self._store_bidask(bidask, source="live_bidask")
+
+    def _handle_fop_bidask_sync(self, exchange: Any, bidask: Any) -> None:
+        self._store_bidask(bidask, source="live_fop_bidask")
+
+    def _store_bidask(self, bidask: Any, *, source: str) -> None:
+        code = _normalize_symbol(getattr(bidask, "code", "") or getattr(bidask, "symbol", ""))
         if not code:
             return
         bid_prices = self._coerce_levels(bidask, ["bid_price", "buy_price", "bid_prices", "bids"])
@@ -153,7 +215,7 @@ class LiveOrderBookCache:
                 "bid": self._pack_levels(bid_prices, bid_volumes),
                 "ask": self._pack_levels(ask_prices, ask_volumes),
                 "ts": ts,
-                "source": "live_bidask",
+                "source": source,
             }
 
     @staticmethod
@@ -338,6 +400,7 @@ def build_monitor_subscription_symbols(
 ) -> List[str]:
     base = [_normalize_symbol(s) for s in raw_symbols]
     base = [s for s in dict.fromkeys(base) if s]
+    base = [s for s in base if not _extract_index_futures_prefixes([s])]
     if not include_warrants:
         return base
     warrant_codes = load_related_warrant_codes(
@@ -347,15 +410,49 @@ def build_monitor_subscription_symbols(
     return [s for s in dict.fromkeys([*base, *warrant_codes]) if s]
 
 
+def _index_futures_name(prefix: str) -> str:
+    code = _normalize_symbol(prefix)
+    if code == "TXF":
+        return "大台指"
+    if code == "MXF":
+        return "小台指"
+    return code
+
+
+def _extract_index_futures_prefixes(symbols: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    for raw in symbols:
+        code = _normalize_symbol(raw)
+        for prefix in INDEX_FUTURES_PREFIXES:
+            if code == prefix or code.startswith(prefix):
+                out.append(prefix)
+                break
+    return [s for s in dict.fromkeys(out) if s]
+
+
+def resolve_index_futures_symbols(prefixes: Iterable[str]) -> Dict[str, str]:
+    wanted = _extract_index_futures_prefixes(prefixes)
+    if not wanted:
+        return {}
+    return all_around_engine.add_futures_prefixes(wanted)
+
+
 class IntradaySignalDetector:
     def __init__(
         self,
         *,
         thresholds: MonitorThresholds,
         watch_symbols: Optional[Set[str]] = None,
+        futures_aliases: Optional[Dict[str, str]] = None,
     ) -> None:
         self.thresholds = thresholds
         self.watch_symbols = {_normalize_symbol(s) for s in (watch_symbols or set()) if s}
+        self.futures_aliases = {
+            _normalize_symbol(prefix): _normalize_symbol(code)
+            for prefix, code in (futures_aliases or {}).items()
+            if _normalize_symbol(prefix) and _normalize_symbol(code)
+        }
+        self.futures_code_to_prefix = {code: prefix for prefix, code in self.futures_aliases.items()}
         self.warrant_map = load_warrant_underlying_map()
         self.branch_tags = load_overnight_branch_tags()
         self._price_windows: Dict[str, Deque[Tuple[float, float]]] = defaultdict(deque)
@@ -378,6 +475,23 @@ class IntradaySignalDetector:
                 spoof_drop_pct=thresholds.scalp_spoof_drop_pct,
             )
         )
+        self._futures_scalp_engine = IntradayScalpEngine(
+            ScalpTriggerConfig(
+                consecutive_window_sec=thresholds.scalp_consecutive_window_sec,
+                consecutive_min_count=thresholds.futures_consecutive_min_count,
+                consecutive_min_volume=thresholds.futures_consecutive_min_volume,
+                reversal_min_lots=thresholds.futures_reversal_min_lots,
+                block_trade_lots=thresholds.futures_lot_threshold,
+                mega_trade_lots=max(thresholds.futures_lot_threshold * 2, 20),
+                vwap_deviation_pct=thresholds.futures_vwap_deviation_pct,
+                no_new_extreme_sec=thresholds.scalp_no_new_extreme_sec,
+                wall_lots_absolute=thresholds.futures_wall_lots,
+                wall_avg_volume_multiple=thresholds.scalp_wall_avg_volume_multiple,
+                spoof_min_lots=max(thresholds.futures_wall_lots, thresholds.futures_lot_threshold * 5),
+                spoof_drop_pct=thresholds.scalp_spoof_drop_pct,
+                tick_size=1.0,
+            )
+        )
         self._last_fired: Dict[str, float] = {}
         self._last_reference_reload = time.time()
 
@@ -387,6 +501,11 @@ class IntradaySignalDetector:
         symbol = _normalize_symbol(tick.get("symbol"))
         if not symbol:
             return []
+
+        if self._is_index_futures_symbol(symbol):
+            if not self._futures_is_watched(symbol):
+                return []
+            return self._process_futures_tick(tick, time.time())
 
         warrant_info = self.warrant_map.get(symbol)
         related_symbol = _normalize_symbol(warrant_info.get("underlying_symbol")) if warrant_info else symbol
@@ -425,6 +544,70 @@ class IntradaySignalDetector:
             events.append(move)
 
         return events
+
+    def _is_index_futures_symbol(self, symbol: str) -> bool:
+        code = _normalize_symbol(symbol)
+        if not code:
+            return False
+        if code in self.futures_code_to_prefix or code in self.futures_aliases:
+            return True
+        return code.startswith("TXF") or code.startswith("MXF")
+
+    def _futures_is_watched(self, symbol: str) -> bool:
+        if not self.watch_symbols:
+            return True
+        code = _normalize_symbol(symbol)
+        prefix = self.futures_code_to_prefix.get(code)
+        if code in self.watch_symbols or (prefix and prefix in self.watch_symbols):
+            return True
+        return any(code.startswith(watch) for watch in self.watch_symbols if watch in {"TXF", "MXF"})
+
+    def _process_futures_tick(self, tick: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
+        symbol = _normalize_symbol(tick.get("symbol"))
+        order_book = live_order_book_cache.get(symbol)
+        events: List[Dict[str, Any]] = []
+        if self.thresholds.scalp_enabled:
+            for signal in self._futures_scalp_engine.process_tick(tick, order_book=order_book, now=now):
+                events.append(
+                    self._make_scalp_event(
+                        tick,
+                        signal,
+                        now,
+                        related_name=self._futures_display_name(symbol),
+                        instrument_type="futures",
+                    )
+                )
+
+        volume = _safe_int(tick.get("volume"))
+        tick_dir = str(tick.get("tick_dir") or "NONE").upper()
+        if volume >= self.thresholds.futures_lot_threshold and tick_dir in {"OUTER", "INNER"}:
+            side = "buy" if tick_dir == "OUTER" else "sell"
+            key = f"futures_large:{symbol}:{side}"
+            if self._passes_cooldown(key, now, 1.0):
+                events.append(
+                    self._make_event(
+                        tick=tick,
+                        event_type="futures_large_buy" if side == "buy" else "futures_large_sell",
+                        event_label="期貨大單買進" if side == "buy" else "期貨大單賣出",
+                        side=side,
+                        severity="high" if volume >= self.thresholds.futures_lot_threshold * 2 else "normal",
+                        message=f"{symbol} {'外盤' if side == 'buy' else '內盤'} {volume:,} 口",
+                        related_symbol=self.futures_code_to_prefix.get(symbol, symbol),
+                        related_name=self._futures_display_name(symbol),
+                        now=now,
+                        instrument_type="futures",
+                    )
+                )
+        return events
+
+    def _futures_display_name(self, symbol: str) -> str:
+        code = _normalize_symbol(symbol)
+        prefix = self.futures_code_to_prefix.get(code, code)
+        if prefix == "TXF":
+            return "大台指"
+        if prefix == "MXF":
+            return "小台指"
+        return code
 
     def _refresh_reference_data_if_needed(self) -> None:
         now = time.time()
@@ -610,6 +793,7 @@ class IntradaySignalDetector:
         *,
         related_name: Optional[str] = None,
         warrant_name: Optional[str] = None,
+        instrument_type: str = "stock",
     ) -> Dict[str, Any]:
         target_symbol = _normalize_symbol(signal.related_symbol or signal.symbol)
         event_tick = dict(tick)
@@ -627,6 +811,7 @@ class IntradaySignalDetector:
             related_name=related_name or db_queries.get_stock_name(target_symbol),
             warrant_symbol=signal.warrant_symbol,
             warrant_name=warrant_name,
+            instrument_type=instrument_type,
             count=(signal.context.get("run") or {}).get("count"),
             cum_volume=(signal.context.get("run") or {}).get("volume"),
             now=now,
@@ -655,6 +840,7 @@ class IntradaySignalDetector:
         related_name: Optional[str] = None,
         warrant_symbol: Optional[str] = None,
         warrant_name: Optional[str] = None,
+        instrument_type: Optional[str] = None,
         count: Optional[int] = None,
         cum_volume: Optional[int] = None,
         pct_move: Optional[float] = None,
@@ -674,7 +860,7 @@ class IntradaySignalDetector:
             "time": _now_hms_ms(),
             "symbol": symbol,
             "name": str(tick.get("name") or symbol),
-            "instrument_type": "warrant" if warrant_symbol else "stock",
+            "instrument_type": instrument_type or ("warrant" if warrant_symbol else "stock"),
             "event_type": event_type,
             "event_label": event_label,
             "side": side,
@@ -782,6 +968,31 @@ def get_monitor_micro_snapshot(symbol: str) -> Dict[str, Any]:
             "order_book": {"bid": [], "ask": []},
             "tape": [],
             "related_warrants": [],
+        }
+
+    futures_prefixes = _extract_index_futures_prefixes([target])
+    if futures_prefixes:
+        aliases = resolve_index_futures_symbols(futures_prefixes)
+        if aliases:
+            live_order_book_cache.ensure_futures_prefixes(aliases.keys())
+        prefix = futures_prefixes[0]
+        code = aliases.get(prefix, target)
+        recent_target = all_around_engine.get_recent_ticks(
+            stock_symbols={code},
+            include_futures=True,
+            limit=80,
+        )
+        tape = list(reversed(recent_target[-40:]))
+        return {
+            "symbol": prefix,
+            "name": _index_futures_name(prefix),
+            "underlying_symbol": code,
+            "underlying_name": code,
+            "order_book": live_order_book_cache.get(code) or {"bid": [], "ask": []},
+            "tape": tape,
+            "related_warrants": [],
+            "instrument_type": "futures",
+            "futures_aliases": aliases,
         }
 
     warrant_map = load_warrant_underlying_map()

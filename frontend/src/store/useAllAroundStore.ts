@@ -14,7 +14,7 @@ import { wsUrl } from '@/lib/apiBase';
 const MAX_TICKS     = 2000;
 const FLUSH_MS      = 100;   // 節流間隔
 const RECONNECT_MS  = 3000;
-const MIN_STOCK_AMOUNT = 1_000_000;
+const MIN_STOCK_AMOUNT = 800_000;
 const MIN_FUTURES_VOLUME = 10;
 
 type ConnectionState = 'disconnected' | 'connecting' | 'open' | 'error';

@@ -628,6 +628,39 @@ class AllAroundEngine:
             print(f"[AllAround] 期交所商品代碼訂閱股票期貨失敗: {exc}")
             return []
 
+    def add_futures_prefixes(self, prefixes: List[str]) -> Dict[str, str]:
+        """Subscribe nearest futures contracts by product prefix, e.g. TXF/MXF."""
+        from backend.engines.sinopac_session import sinopac_session
+
+        api = self._api or sinopac_session.api
+        if api is None:
+            return {}
+
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return {}
+
+        self._api = api
+        sinopac_session.add_fop_handler(self._dispatch_fop_sync)
+
+        try:
+            import shioaji.constant as sjc
+
+            out: Dict[str, str] = {}
+            for raw in prefixes:
+                prefix = str(raw or "").strip().upper()
+                if not prefix:
+                    continue
+                code = self._subscribe_fop_by_prefix(prefix, self._api, sjc)
+                if code:
+                    out[prefix] = code
+            return out
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AllAround] FOP prefix subscribe failed: {exc}")
+            return {}
+
     def add_stk_symbols(self, symbols: List[str]) -> None:
         """個股頁 WS 連線時動態訂閱；即使 start() 未成功，仍嘗試使用共享 Session。"""
         from backend.engines.sinopac_session import sinopac_session
@@ -776,6 +809,16 @@ class AllAroundEngine:
 
     def get_stock_futures_underlying_map(self) -> Dict[str, str]:
         return dict(self._futures_underlying_map)
+
+    def get_known_futures_symbols(self) -> List[str]:
+        symbols = set(self._subscribed_fop)
+        symbols.update(self._futures_underlying_map.keys())
+        symbols.update(
+            symbol
+            for symbol, asset in self._asset_map.items()
+            if asset == AssetType.FUTURES
+        )
+        return sorted(symbols)
 
     # ── 健康狀態 ──────────────────────────────────────────────────────────────
 

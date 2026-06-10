@@ -19,9 +19,9 @@ router = APIRouter()
 
 ALL_AROUND_TOP_N = 300
 ALL_AROUND_MAX_WARRANTS_PER_STOCK = 80
-DEFAULT_MIN_STOCK_AMOUNT = 1_000_000.0
+DEFAULT_MIN_STOCK_AMOUNT = 800_000.0
 DEFAULT_MIN_FUTURES_VOLUME = 10
-DEFAULT_MIN_STOCK_FUTURES_VOLUME = 1
+DEFAULT_MIN_STOCK_FUTURES_VOLUME = DEFAULT_MIN_FUTURES_VOLUME
 DEFAULT_MIN_WARRANT_VOLUME = 100
 DEFAULT_MIN_WARRANT_AMOUNT = 100_000.0
 ALL_AROUND_FUTURES_PREFIXES = ("TXF", "MXF")
@@ -122,6 +122,7 @@ def _all_around_scope(
                 underlying_names,
             )
         )
+    stock_future_symbols.update(all_around_engine.get_known_futures_symbols())
     return stock_side_symbols, underlyings, underlying_names, stock_future_symbols
 
 
@@ -152,16 +153,16 @@ def _stock_large_order_floor(price: float, base_amount_floor: float) -> tuple[in
     The rolling percentile below can only raise these floors, not lower them.
     """
     if price >= 1000:
-        return 3, max(base_amount_floor, 3_000_000.0)
+        return 3, max(base_amount_floor, 2_500_000.0)
     if price >= 500:
-        return 5, max(base_amount_floor, 2_500_000.0)
+        return 4, max(base_amount_floor, 2_000_000.0)
     if price >= 200:
-        return 10, max(base_amount_floor, 2_000_000.0)
+        return 8, max(base_amount_floor, 1_600_000.0)
     if price >= 100:
-        return 20, max(base_amount_floor, 2_000_000.0)
+        return 16, max(base_amount_floor, 1_600_000.0)
     if price >= 50:
-        return 30, max(base_amount_floor, 2_000_000.0)
-    return 50, max(base_amount_floor, 2_000_000.0)
+        return 24, max(base_amount_floor, 1_600_000.0)
+    return 40, max(base_amount_floor, 1_600_000.0)
 
 
 def _recent_stock_thresholds(
@@ -213,8 +214,6 @@ def _is_large_tick(
 
     asset = str(tick.get("asset_type", ""))
     if asset == AssetType.FUTURES.value:
-        if not _is_allowed_all_around_future(str(tick.get("symbol", ""))):
-            return volume >= DEFAULT_MIN_STOCK_FUTURES_VOLUME
         return volume >= min_futures_volume
 
     amount = price * volume * 1000.0
@@ -249,7 +248,8 @@ def _should_send_tick(
         include_futures
         and asset == AssetType.FUTURES.value
         and (
-            _norm_symbol(sym) in futures_symbols
+            not futures_symbols
+            or _norm_symbol(sym) in futures_symbols
             or _is_allowed_all_around_future(sym)
         )
     )
@@ -443,7 +443,7 @@ async def all_around_ticker_ws(websocket: WebSocket):
       scope          all_around 時使用指定市值前 300 股票、關聯權證、股票期貨 + TXF/MXF
       include_futures 是否包含期貨 tick（true/false）
       large_only     true 時只推送大單
-      min_stock_amount 現貨大單成交金額門檻，預設 1000000
+      min_stock_amount 現貨大單成交金額門檻，預設 800000
       min_futures_volume 期貨大單口數門檻，預設 10
       history_limit   回補歷史筆數上限（預設 120，最大 2000）
 

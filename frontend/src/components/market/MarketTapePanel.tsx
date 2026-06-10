@@ -42,7 +42,7 @@ const DIR_LABEL: Record<TickDir, { text: string; cls: string }> = {
 
 const ASSET_BADGE: Record<AssetType, { label: string; icon: string; cls: string }> = {
   '現貨': { label: '現貨', icon: '',   cls: 'text-sky-300    bg-sky-900/40    border-sky-700/50' },
-  '期貨': { label: '期貨', icon: '📈', cls: 'text-orange-300 bg-orange-900/40 border-orange-700/50' },
+  '期貨': { label: '期貨', icon: '',   cls: 'text-orange-300 bg-orange-900/40 border-orange-700/50' },
   '認購': { label: '認購', icon: '🎫', cls: 'text-red-300    bg-red-900/30    border-red-700/40' },
   '認售': { label: '認售', icon: '🎫', cls: 'text-emerald-300 bg-emerald-900/30 border-emerald-700/40' },
 };

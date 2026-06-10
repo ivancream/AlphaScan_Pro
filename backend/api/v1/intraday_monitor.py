@@ -8,12 +8,14 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from backend.db.user_db import get_recent_monitor_events, write_monitor_event
 from backend.engines.engine_all_around import all_around_engine
 from backend.engines.engine_intraday_monitor import (
+    INDEX_FUTURES_PREFIXES,
     IntradaySignalDetector,
     MonitorThresholds,
     build_monitor_subscription_symbols,
     get_monitor_health,
     get_monitor_micro_snapshot,
     live_order_book_cache,
+    resolve_index_futures_symbols,
 )
 
 router = APIRouter()
@@ -86,6 +88,7 @@ async def intraday_monitor_ws(websocket: WebSocket):
         "true",
         "yes",
     }
+    include_index_futures = _parse_bool(websocket.query_params.get("include_index_futures"), True)
     max_warrants_per_stock = _clamp_int(
         websocket.query_params.get("max_warrants_per_stock"),
         40,
@@ -156,6 +159,33 @@ async def intraday_monitor_ws(websocket: WebSocket):
             0.05,
             1.0,
         ),
+        include_index_futures=include_index_futures,
+        futures_lot_threshold=_clamp_int(websocket.query_params.get("futures_lot_threshold"), 10, 1, 5000),
+        futures_consecutive_min_count=_clamp_int(
+            websocket.query_params.get("futures_consecutive_min_count"),
+            10,
+            2,
+            300,
+        ),
+        futures_consecutive_min_volume=_clamp_int(
+            websocket.query_params.get("futures_consecutive_min_volume"),
+            30,
+            1,
+            10000,
+        ),
+        futures_reversal_min_lots=_clamp_int(
+            websocket.query_params.get("futures_reversal_min_lots"),
+            5,
+            1,
+            5000,
+        ),
+        futures_vwap_deviation_pct=_clamp_float(
+            websocket.query_params.get("futures_vwap_deviation_pct"),
+            0.25,
+            0.01,
+            5.0,
+        ),
+        futures_wall_lots=_clamp_int(websocket.query_params.get("futures_wall_lots"), 80, 1, 50000),
     )
 
     subscription_symbols = build_monitor_subscription_symbols(
@@ -167,9 +197,20 @@ async def intraday_monitor_ws(websocket: WebSocket):
         all_around_engine.add_stk_symbols(subscription_symbols)
         live_order_book_cache.ensure_symbols(subscription_symbols)
 
+    futures_aliases: Dict[str, str] = {}
+    if include_index_futures:
+        futures_aliases = resolve_index_futures_symbols(INDEX_FUTURES_PREFIXES)
+        if futures_aliases:
+            live_order_book_cache.ensure_futures_prefixes(futures_aliases.keys())
+
+    detector_watch_symbols = set(watch_symbols)
+    detector_watch_symbols.update(futures_aliases.keys())
+    detector_watch_symbols.update(futures_aliases.values())
+
     detector = IntradaySignalDetector(
         thresholds=thresholds,
-        watch_symbols=watch_symbols,
+        watch_symbols=detector_watch_symbols,
+        futures_aliases=futures_aliases,
     )
     subscription = all_around_engine.subscribe()
 
@@ -178,7 +219,8 @@ async def intraday_monitor_ws(websocket: WebSocket):
             "type": "ready",
             "payload": {
                 "watch_symbols": sorted(watch_symbols),
-                "subscribed_symbols": subscription_symbols,
+                "subscribed_symbols": [*subscription_symbols, *futures_aliases.values()],
+                "futures_aliases": futures_aliases,
                 "thresholds": thresholds.__dict__,
                 "health": get_monitor_health(),
             },

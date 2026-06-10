@@ -41,6 +41,13 @@ function buildQuery(config: IntradayMonitorConfig): string {
   params.set('continuous_min_count', String(config.continuousMinCount));
   params.set('include_warrants', String(config.includeWarrants));
   params.set('max_warrants_per_stock', String(config.maxWarrantsPerStock));
+  if (config.includeIndexFutures !== undefined) params.set('include_index_futures', String(config.includeIndexFutures));
+  if (config.futuresLotThreshold !== undefined) params.set('futures_lot_threshold', String(config.futuresLotThreshold));
+  if (config.futuresConsecutiveMinCount !== undefined) params.set('futures_consecutive_min_count', String(config.futuresConsecutiveMinCount));
+  if (config.futuresConsecutiveMinVolume !== undefined) params.set('futures_consecutive_min_volume', String(config.futuresConsecutiveMinVolume));
+  if (config.futuresReversalMinLots !== undefined) params.set('futures_reversal_min_lots', String(config.futuresReversalMinLots));
+  if (config.futuresVwapDeviationPct !== undefined) params.set('futures_vwap_deviation_pct', String(config.futuresVwapDeviationPct));
+  if (config.futuresWallLots !== undefined) params.set('futures_wall_lots', String(config.futuresWallLots));
   if (config.scalpEnabled !== undefined) params.set('scalp_enabled', String(config.scalpEnabled));
   if (config.scalpConsecutiveWindowSec !== undefined) params.set('scalp_consecutive_window_sec', String(config.scalpConsecutiveWindowSec));
   if (config.scalpConsecutiveMinCount !== undefined) params.set('scalp_consecutive_min_count', String(config.scalpConsecutiveMinCount));

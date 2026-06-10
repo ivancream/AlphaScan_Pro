@@ -61,6 +61,7 @@ class SinopacSession:
         self._stk_handlers: List[Callable] = []
         self._fop_handlers: List[Callable] = []
         self._stk_bidask_handlers: List[Callable] = []
+        self._fop_bidask_handlers: List[Callable] = []
         self._callbacks_registered = False
 
     # ── 連線管理 ─────────────────────────────────────────────────────────────
@@ -153,6 +154,17 @@ class SinopacSession:
         except Exception as exc:  # noqa: BLE001
             print(f"[SinopacSession] BidAsk callback registration skipped: {exc}")
 
+        try:
+            @api.on_bidask_fop_v1()
+            def _master_fop_bidask(exchange, bidask):
+                for handler in self._fop_bidask_handlers:
+                    try:
+                        handler(exchange, bidask)
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SinopacSession] FOP BidAsk callback registration skipped: {exc}")
+
         self._callbacks_registered = True
         print("[SinopacSession] Master tick callbacks 已注冊")
 
@@ -170,6 +182,11 @@ class SinopacSession:
         """新增股票 BidAsk 五檔處理器（允許多個引擎共用）。"""
         if handler not in self._stk_bidask_handlers:
             self._stk_bidask_handlers.append(handler)
+
+    def add_fop_bidask_handler(self, handler: Callable) -> None:
+        """新增期貨/選擇權 BidAsk 五檔處理器（允許多個引擎共用）。"""
+        if handler not in self._fop_bidask_handlers:
+            self._fop_bidask_handlers.append(handler)
 
     # ── Snapshot 批次查詢 ────────────────────────────────────────────────────
 

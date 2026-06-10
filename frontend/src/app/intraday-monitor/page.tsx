@@ -25,7 +25,7 @@ import {
 import type { MonitorConnectionState, MonitorSignalEvent } from '@/types/intradayMonitor';
 
 const DEFAULT_CONFIG: IntradayMonitorConfig = {
-  symbols: ['2330', '2317', '2454', '3231', '2603'],
+  symbols: ['TXF', 'MXF', '2330', '2317', '2454', '3231', '2603'],
   stockLotThreshold: 50,
   warrantLotThreshold: 100,
   moveWindowSec: 60,
@@ -34,6 +34,13 @@ const DEFAULT_CONFIG: IntradayMonitorConfig = {
   continuousMinCount: 3,
   maxWarrantsPerStock: 40,
   includeWarrants: true,
+  includeIndexFutures: true,
+  futuresLotThreshold: 10,
+  futuresConsecutiveMinCount: 10,
+  futuresConsecutiveMinVolume: 30,
+  futuresReversalMinLots: 5,
+  futuresVwapDeviationPct: 0.25,
+  futuresWallLots: 80,
 };
 
 function parseSymbols(value: string): string[] {

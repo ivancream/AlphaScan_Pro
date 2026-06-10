@@ -11,6 +11,13 @@ export interface MonitorThresholds {
   continuousMinCount: number;
   maxWarrantsPerStock: number;
   includeWarrants: boolean;
+  includeIndexFutures?: boolean;
+  futuresLotThreshold?: number;
+  futuresConsecutiveMinCount?: number;
+  futuresConsecutiveMinVolume?: number;
+  futuresReversalMinLots?: number;
+  futuresVwapDeviationPct?: number;
+  futuresWallLots?: number;
   scalpEnabled?: boolean;
   scalpConsecutiveWindowSec?: number;
   scalpConsecutiveMinCount?: number;
@@ -29,7 +36,7 @@ export interface MonitorSignalEvent {
   time: string;
   symbol: string;
   name: string;
-  instrument_type: 'stock' | 'warrant';
+  instrument_type: 'stock' | 'warrant' | 'futures';
   event_type:
     | 'stock_large_buy'
     | 'stock_large_sell'
@@ -43,7 +50,9 @@ export interface MonitorSignalEvent {
     | 'order_book_spoof_pull'
     | 'scalp_short_exhaustion'
     | 'scalp_long_exhaustion'
-    | 'warrant_hedge_exhaustion';
+    | 'warrant_hedge_exhaustion'
+    | 'futures_large_buy'
+    | 'futures_large_sell';
   event_label: string;
   side: SignalSide;
   severity: 'normal' | 'high';
@@ -71,6 +80,7 @@ export interface MonitorSignalEvent {
 export interface MonitorReadyPayload {
   watch_symbols: string[];
   subscribed_symbols: string[];
+  futures_aliases?: Record<string, string>;
   thresholds: Record<string, number | boolean>;
   health: {
     shioaji_connected: boolean;
@@ -117,10 +127,12 @@ export interface MonitorMicroSnapshot {
   name: string;
   underlying_symbol: string;
   underlying_name: string;
+  instrument_type?: 'stock' | 'warrant' | 'futures';
+  futures_aliases?: Record<string, string>;
   order_book: {
     bid: OrderBookLevel[];
     ask: OrderBookLevel[];
-    source?: 'live_bidask' | 'snapshot';
+    source?: 'live_bidask' | 'live_fop_bidask' | 'snapshot';
     ts?: string;
   };
   tape: MonitorTapeTick[];

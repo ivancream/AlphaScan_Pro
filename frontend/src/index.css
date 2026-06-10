@@ -1,9 +1,72 @@
 @import "tailwindcss";
 
+:root {
+  --as-bg: #12141b;
+  --as-bg-soft: #171a23;
+  --as-sidebar: #161922;
+  --as-card: #242832;
+  --as-card-soft: #1b1f29;
+  --as-border: rgba(148, 163, 184, 0.14);
+  --as-border-strong: rgba(148, 163, 184, 0.24);
+  --as-text: #f4f7fb;
+  --as-muted: #7b8494;
+  --as-red: #ff4a4a;
+  --as-green: #00d287;
+  --as-yellow: #f4c542;
+  --as-cyan: #43d5ff;
+}
+
+html {
+  background: var(--as-bg);
+}
+
 body {
-  background: #0E1117;
-  color: #e5e7eb;
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--as-bg);
+  color: var(--as-text);
+  font-family:
+    Inter, "Noto Sans TC", "Microsoft JhengHei", Arial, Helvetica, sans-serif;
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.market-card {
+  border: 1px solid var(--as-border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
+    var(--as-card);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.market-card-soft {
+  border: 1px solid var(--as-border);
+  border-radius: 8px;
+  background: var(--as-card-soft);
+}
+
+.market-number {
+  font-family:
+    "Roboto Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.text-up {
+  color: var(--as-red);
+}
+
+.text-down {
+  color: var(--as-green);
+}
+
+.text-neutral-market {
+  color: var(--as-yellow);
 }
 
 /* custom-scrollbar */
@@ -17,17 +80,17 @@ body {
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #334155;
+  background-color: rgba(100, 116, 139, 0.55);
   border-radius: 20px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: #475569;
+  background-color: rgba(148, 163, 184, 0.7);
 }
 
 /* Global Form Color Consistency - Force Yellow Theme */
 input[type="checkbox"],
 input[type="radio"],
 input[type="range"] {
-  accent-color: #EAB308 !important;
+  accent-color: var(--as-yellow) !important;
 }

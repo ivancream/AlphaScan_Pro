@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   BarChart3,
+  Bell,
   CandlestickChart,
   GitMerge,
   Landmark,
@@ -28,7 +29,6 @@ type NavItem = {
   href: string;
   icon: React.ReactNode;
   label: string;
-  description?: string;
 };
 
 type NavGroup = {
@@ -41,25 +41,25 @@ type NavGroup = {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    title: '盤中戰情',
+    title: '即時盤勢',
     subtitle: 'Live',
     items: [
       { href: '/taiex-dynamics', icon: <Activity size={18} />, label: '大盤動態' },
       { href: '/intraday-monitor', icon: <Radar size={18} />, label: '盤中監控' },
       { href: '/all-around', icon: <LineChart size={18} />, label: '全市場 Tape' },
-      { href: '/capital-flow', icon: <BarChart3 size={18} />, label: '資金熱區' },
+      { href: '/capital-flow', icon: <BarChart3 size={18} />, label: '資金流向' },
     ],
   },
   {
-    title: '交易選股',
+    title: '選股清單',
     subtitle: 'Scan',
     separated: true,
     showStockNav: true,
     items: [
       { href: '/watchlist', icon: <Star size={18} />, label: '自選股' },
-      { href: '/long-selection', icon: <TrendingUp size={18} />, label: '偏多選股' },
-      { href: '/short-selection', icon: <TrendingDown size={18} />, label: '偏空選股' },
-      { href: '/double-sword', icon: <GitMerge size={18} />, label: '雙劍合璧' },
+      { href: '/long-selection', icon: <TrendingUp size={18} />, label: '多方選股' },
+      { href: '/short-selection', icon: <TrendingDown size={18} />, label: '空方選股' },
+      { href: '/double-sword', icon: <GitMerge size={18} />, label: '雙劍策略' },
     ],
   },
   {
@@ -68,7 +68,7 @@ const NAV_GROUPS: NavGroup[] = [
     separated: true,
     items: [
       { href: '/warrant-selection', icon: <Target size={18} />, label: '權證篩選' },
-      { href: '/dividends', icon: <Landmark size={18} />, label: '股利除息' },
+      { href: '/dividends', icon: <Landmark size={18} />, label: '股利分析' },
       { href: '/cb-bond', icon: <CandlestickChart size={18} />, label: '可轉債 CB' },
     ],
   },
@@ -76,12 +76,12 @@ const NAV_GROUPS: NavGroup[] = [
 
 const PAGE_TITLES: Record<string, string> = {
   '/technical': '技術分析',
-  '/global-market': '全球市場',
-  '/fundamental': '基本面分析',
+  '/global-market': '國際市場',
+  '/fundamental': '基本面',
   '/chips': '籌碼分析',
-  '/disposition': '處置股分析',
+  '/disposition': '處置股',
   '/floor-bounce': '跌深反彈',
-  '/etf-tracker': 'ETF 持股追蹤',
+  '/etf-tracker': 'ETF 追蹤',
 };
 
 const NAV_ITEMS = NAV_GROUPS.flatMap((group) => group.items);
@@ -93,7 +93,7 @@ function isDirectSymbolQuery(input: string): boolean {
 function getPageTitle(pathname: string): string {
   const matched = NAV_ITEMS.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
   if (matched) return matched.label;
-  if (pathname === '/stock' || pathname.startsWith('/stock/')) return '個股中心';
+  if (pathname === '/stock' || pathname.startsWith('/stock/')) return '個股看盤';
   for (const [path, title] of Object.entries(PAGE_TITLES)) {
     if (pathname === path || pathname.startsWith(`${path}/`)) return title;
   }
@@ -136,7 +136,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
         const message =
           typeof (data as { detail?: string }).detail === 'string'
             ? (data as { detail: string }).detail
-            : '找不到符合的股票代號或名稱';
+            : '查無股票代號，請確認輸入內容。';
         window.alert(message);
         return;
       }
@@ -146,53 +146,54 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       navigate(toStockDetailPath(resolvedSymbol));
     } catch (error) {
       console.error('Symbol resolution failed:', error);
-      window.alert('查詢失敗，請確認後端 API 已啟動。');
+      window.alert('無法連線到股票查詢 API，請確認後端服務狀態。');
     }
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#0E1117] font-sans text-gray-200">
+    <div className="app-shell flex h-screen overflow-hidden bg-[var(--as-bg)] font-sans text-[var(--as-text)]">
       {isLoading && <BackendLoadingOverlay />}
       {isError && <BackendErrorOverlay error={backendError} />}
 
       <aside
         className={clsx(
-          'flex flex-col border-r border-gray-800 bg-[#161B22] transition-all duration-300 ease-in-out',
+          'flex flex-col border-r border-[var(--as-border)] bg-[var(--as-sidebar)] transition-all duration-300 ease-in-out',
           isSidebarOpen ? 'relative w-64' : 'absolute z-20 h-full w-16 lg:relative',
         )}
       >
-        <div className="flex h-16 shrink-0 items-center justify-between border-b border-gray-800 p-4">
+        <div className="flex h-16 shrink-0 items-center justify-between border-b border-[var(--as-border)] px-4">
           {isSidebarOpen && (
-            <span className="flex items-center text-xl font-bold tracking-widest text-white">
-              Alpha<span className="text-[#EAB308]">Scan</span>
-            </span>
+            <Link to="/" className="flex items-baseline gap-1 text-xl font-black tracking-wide text-white">
+              Alpha<span className="text-[var(--as-yellow)]">Scan</span>
+              <span className="ml-1 text-[10px] font-bold uppercase tracking-[0.28em] text-[var(--as-muted)]">Pro</span>
+            </Link>
           )}
           <button
             type="button"
             onClick={() => setSidebarOpen((open) => !open)}
-            className="ml-auto rounded p-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
-            aria-label={isSidebarOpen ? '收合選單' : '展開選單'}
+            className="ml-auto rounded-md p-2 text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+            aria-label={isSidebarOpen ? '收合側邊欄' : '展開側邊欄'}
           >
-            {isSidebarOpen ? <X size={20} /> : <Menu size={20} />}
+            {isSidebarOpen ? <X size={19} /> : <Menu size={19} />}
           </button>
         </div>
 
-        <nav className="custom-scrollbar mt-2 flex-1 overflow-y-auto overflow-x-hidden p-2">
+        <nav className="custom-scrollbar mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-3">
           {NAV_GROUPS.map((group) => (
-            <div key={group.title} className={clsx('space-y-1', group.separated && 'mt-5 border-t border-gray-800 pt-4')}>
+            <div key={group.title} className={clsx('space-y-1', group.separated && 'mt-5 border-t border-[var(--as-border)] pt-4')}>
               {isSidebarOpen ? (
                 <div className="px-2 pb-2 pt-1">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-500">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--as-muted)]">
                       {group.title}
                     </span>
-                    <span className="rounded-full border border-gray-700 bg-[#0E1117] px-2 py-0.5 text-[10px] font-medium text-gray-400">
+                    <span className="rounded-full border border-[var(--as-border)] bg-[var(--as-bg)] px-2 py-0.5 text-[10px] font-medium text-slate-400">
                       {group.subtitle}
                     </span>
                   </div>
                 </div>
               ) : group.separated ? (
-                <div className="mx-2 my-2 border-t border-gray-800" />
+                <div className="mx-2 my-2 border-t border-[var(--as-border)]" />
               ) : null}
 
               {group.items.map((item) => (
@@ -211,36 +212,43 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
         </nav>
       </aside>
 
-      <main className="flex h-full w-full flex-1 flex-col overflow-hidden">
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-gray-800 bg-[#0E1117] px-6">
-          <div className="flex items-center gap-6">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.35em] text-gray-500">Trading Terminal</p>
-              <h1 className="text-lg font-bold tracking-widest text-white">{pageTitle}</h1>
+      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-[var(--as-border)] bg-[rgba(18,20,27,0.92)] px-5 backdrop-blur">
+          <div className="flex min-w-0 items-center gap-5">
+            <div className="min-w-[150px]">
+              <p className="text-[10px] font-bold uppercase tracking-[0.32em] text-[var(--as-muted)]">Dashboard</p>
+              <h1 className="truncate text-lg font-black tracking-wide text-white">{pageTitle}</h1>
             </div>
-            <div className="group relative">
+            <div className="group relative hidden sm:block">
               <Search
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-[#EAB308]"
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-[var(--as-yellow)]"
                 size={16}
               />
               <input
                 type="text"
-                placeholder="輸入股票代號或名稱，Enter 查詢"
+                placeholder="輸入股票代號或名稱"
                 value={searchValue}
                 onChange={(e) => setSearchValue(e.target.value)}
-                className="w-[320px] rounded-lg border border-gray-700 bg-[#161B22] py-2 pl-10 pr-4 text-sm text-white transition-all focus:border-[#EAB308] focus:outline-none focus:ring-1 focus:ring-[#EAB308]"
+                className="h-10 w-[320px] rounded-md border border-[var(--as-border)] bg-[var(--as-card)] py-2 pl-10 pr-4 text-sm font-semibold text-white outline-none transition-all placeholder:text-slate-600 focus:border-[var(--as-yellow)] focus:ring-1 focus:ring-[var(--as-yellow)]"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void handleSubmit();
                 }}
               />
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              className="hidden h-10 w-10 items-center justify-center rounded-md border border-[var(--as-border)] bg-[var(--as-card)] text-slate-400 transition-colors hover:border-[var(--as-yellow)] hover:text-white md:flex"
+              aria-label="通知"
+            >
+              <Bell size={16} />
+            </button>
             <IntradayRefreshBar />
           </div>
         </header>
 
-        <div className="custom-scrollbar relative flex-1 overflow-auto bg-[#0E1117]">{children}</div>
+        <div className="custom-scrollbar relative min-h-0 flex-1 overflow-auto bg-[var(--as-bg)]">{children}</div>
       </main>
 
       <GlobalContextMenu />
@@ -250,19 +258,19 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
 
 function BackendLoadingOverlay() {
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#0E1117]">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[var(--as-bg)]">
       <div className="flex flex-col items-center gap-6">
-        <div className="text-3xl font-bold tracking-widest text-white">
-          Alpha<span className="text-[#EAB308]">Scan</span>
-          <span className="ml-2 text-sm font-normal text-gray-500">Pro</span>
+        <div className="text-3xl font-black tracking-wide text-white">
+          Alpha<span className="text-[var(--as-yellow)]">Scan</span>
+          <span className="ml-2 text-sm font-semibold text-[var(--as-muted)]">Pro</span>
         </div>
         <div className="relative h-12 w-12">
-          <div className="absolute inset-0 rounded-full border-2 border-gray-800" />
-          <div className="absolute inset-0 animate-spin rounded-full border-2 border-t-[#EAB308]" />
+          <div className="absolute inset-0 rounded-full border-2 border-[var(--as-border)]" />
+          <div className="absolute inset-0 animate-spin rounded-full border-2 border-t-[var(--as-yellow)]" />
         </div>
         <div className="text-center">
-          <p className="text-sm text-gray-400">後端啟動中...</p>
-          <p className="mt-1 text-xs text-gray-600">第一次啟動可能需要一點時間</p>
+          <p className="text-sm text-slate-400">正在啟動後端服務...</p>
+          <p className="mt-1 text-xs text-slate-600">載入市場資料與即時連線</p>
         </div>
       </div>
     </div>
@@ -271,27 +279,24 @@ function BackendLoadingOverlay() {
 
 function BackendErrorOverlay({ error }: { error: string | null }) {
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#0E1117]">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[var(--as-bg)]">
       <div className="flex max-w-md flex-col items-center gap-4 px-6 text-center">
-        <div className="text-3xl font-bold tracking-widest text-white">
-          Alpha<span className="text-[#EAB308]">Scan</span>
+        <div className="text-3xl font-black tracking-wide text-white">
+          Alpha<span className="text-[var(--as-yellow)]">Scan</span>
         </div>
-        <div className="flex h-12 w-12 items-center justify-center rounded-full border border-red-800 bg-red-900/30">
-          <span className="text-xl text-red-400">!</span>
+        <div className="flex h-12 w-12 items-center justify-center rounded-full border border-red-500/30 bg-red-500/10">
+          <span className="text-xl text-red-300">!</span>
         </div>
         <div>
-          <p className="font-medium text-red-400">後端啟動失敗</p>
-          <p className="mt-2 break-all font-mono text-xs text-gray-500">{error}</p>
+          <p className="font-semibold text-red-300">後端服務啟動失敗</p>
+          <p className="mt-2 break-all font-mono text-xs text-slate-500">{error}</p>
         </div>
-        <p className="text-xs text-gray-600">
-          請確認 FastAPI 後端或 Tauri sidecar 已正確啟動，並且 8000 port 沒有被其他程序占用。
-        </p>
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="mt-2 rounded-lg bg-[#EAB308] px-4 py-2 text-sm font-medium text-black transition-colors hover:bg-yellow-400"
+          className="mt-2 rounded-md bg-[var(--as-yellow)] px-4 py-2 text-sm font-black text-black transition-colors hover:bg-yellow-300"
         >
-          重新整理
+          重新載入
         </button>
       </div>
     </div>
@@ -308,16 +313,16 @@ function StockNavItem({ isOpen, pathname }: { isOpen: boolean; pathname: string 
     <Link
       to={href}
       className={clsx(
-        'flex w-full items-center overflow-hidden whitespace-nowrap rounded-lg p-2.5 transition-colors',
+        'group flex w-full items-center overflow-hidden whitespace-nowrap rounded-md px-3 py-2.5 transition-colors',
         active
-          ? 'border-l-2 border-cyan-400 bg-[#1E293B] text-cyan-400'
-          : 'text-gray-400 hover:bg-gray-800 hover:text-white',
+          ? 'bg-[rgba(234,179,8,0.12)] text-[var(--as-yellow)] shadow-[inset_3px_0_0_var(--as-yellow)]'
+          : 'text-slate-400 hover:bg-white/[0.055] hover:text-white',
       )}
     >
       <span className="shrink-0">
         <LineChart size={18} />
       </span>
-      {isOpen && <span className="ml-3 text-sm font-medium">個股中心</span>}
+      {isOpen && <span className="ml-3 text-sm font-semibold">個股看盤</span>}
     </Link>
   );
 }
@@ -339,14 +344,15 @@ function NavItemRow({
     <Link
       to={href}
       className={clsx(
-        'flex w-full items-center overflow-hidden whitespace-nowrap rounded-lg p-2.5 transition-colors',
+        'group flex w-full items-center overflow-hidden whitespace-nowrap rounded-md px-3 py-2.5 transition-colors',
         active
-          ? 'border-l-2 border-[#EAB308] bg-[#1E293B] text-[#EAB308]'
-          : 'text-gray-400 hover:bg-gray-800 hover:text-white',
+          ? 'bg-[rgba(234,179,8,0.12)] text-[var(--as-yellow)] shadow-[inset_3px_0_0_var(--as-yellow)]'
+          : 'text-slate-400 hover:bg-white/[0.055] hover:text-white',
       )}
+      title={isOpen ? undefined : label}
     >
       <span className="shrink-0">{icon}</span>
-      {isOpen && <span className="ml-3 text-sm font-medium">{label}</span>}
+      {isOpen && <span className="ml-3 text-sm font-semibold">{label}</span>}
     </Link>
   );
 }
